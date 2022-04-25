@@ -603,9 +603,10 @@ void CCommentWindow::Update()
 	if (hwnd_ && bUseOsd_) {
 		// OSDに描画
 		if (bShowOsd_) {
-			osdCompositor_.UpdateSurface();
-		} else {
-			if ((!chatList_.empty() || !chatPoolList_.empty()) && IsWindowVisible(hwndParent_)) {
+			if (IsWindowVisible(hwndParent_) && !IsIconic(hwndParent_)) osdCompositor_.UpdateSurface();
+		}
+		else {
+			if ((!chatList_.empty() || !chatPoolList_.empty()) && IsWindowVisible(hwndParent_) && !IsIconic(hwndParent_)) {
 				bShowOsd_ = true;
 				OnParentSize();
 				if (bShowOsd_) {
@@ -613,12 +614,14 @@ void CCommentWindow::Update()
 				}
 			}
 		}
-	} else if (hwnd_ && !bUseOsd_) {
+	}
+	else if (hwnd_ && !bUseOsd_) {
 		// レイヤードウィンドウに描画
 		if (IsWindowVisible(hwnd_)) {
-			UpdateLayeredWindow();
-		} else {
-			if ((!chatList_.empty() || !chatPoolList_.empty()) && IsWindowVisible(hwndParent_)) {
+			if (IsWindowVisible(hwndParent_) && !IsIconic(hwndParent_)) UpdateLayeredWindow();
+		}
+		else {
+			if ((!chatList_.empty() || !chatPoolList_.empty()) && IsWindowVisible(hwndParent_) && !IsIconic(hwndParent_)) {
 				ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
 				UpdateLayeredWindow();
 			}
