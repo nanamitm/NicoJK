@@ -177,7 +177,6 @@ bool CNicoJK::Initialize()
 	wc.style = CS_VREDRAW | CS_HREDRAW;
 	wc.lpfnWndProc = ForceWindowProc;
 	wc.hInstance = g_hinstDLL;
-	wc.hbrBackground = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
 	wc.lpszClassName = TEXT("ru.jk.force");
 	if (RegisterClassEx(&wc) == 0) {
 		return false;
@@ -1110,8 +1109,8 @@ LRESULT CALLBACK CNicoJK::EventCallback(UINT Event, LPARAM lParam1, LPARAM lPara
 	case TVTest::EVENT_COLORCHANGE:
 		// 色の設定が変化した
 		if (pThis->hPanel_ && pThis->hForce_) {
-			DeleteBrush(SetClassLongPtr(pThis->hForce_, GCLP_HBRBACKGROUND,
-				reinterpret_cast<LONG_PTR>(CreateSolidBrush(pThis->m_pApp->GetColor(L"ControlPanelMargin")))));
+			pThis->panelColor_.SetDelaySetColorFlag();;// カラーデータのキャッシュ作成を予約
+
 			InvalidateRect(pThis->hForce_, nullptr, TRUE);
 		}
 		break;
@@ -1591,7 +1590,8 @@ static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 				GetClientRect(hwnd, &rc);
 				if (rc.bottom > rcLast.bottom) {
 					rc.top = rcLast.bottom;
-					FillRect(reinterpret_cast<HDC>(wParam), &rc, reinterpret_cast<HBRUSH>(GetClassLongPtr(hwnd, GCLP_HBRBACKGROUND)));
+
+					FillRect(reinterpret_cast<HDC>(wParam), &rc, reinterpret_cast<HBRUSH>(GetClassLongPtr(GetParent(hwnd), GCLP_HBRBACKGROUND)));
 				}
 				return TRUE;
 			}
@@ -1782,10 +1782,10 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	    // TODO: (描画がとても面倒なので)スライダーはパネルでは表示しない
 	    CreateWindowEx(0, TRACKBAR_CLASS, TEXT("不透明度"), WS_CHILD | WS_VISIBLE | TBS_BOTH | TBS_NOTICKS | TBS_TOOLTIPS,
 	        padding + 224, hPanel_ ? -100 : padding + 4, 64, 21, hwnd, reinterpret_cast<HMENU>(IDC_SLIDER_OPACITY), g_hinstDLL, nullptr) &&
-	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
-	        padding, padding + 24, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
-	    CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS,
-	        padding, padding + 124, 100, 50, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr))
+		(hListbox_ = CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
+	        padding, padding + 24, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr)) != NULL &&
+		(hCombobox_ = CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS  | CBS_OWNERDRAWFIXED,
+			padding, padding + 124, 100, 50, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr)) != NULL)
 	{
 		if (hForceFont_) {
 			SendDlgItemMessage(hwnd, IDC_RADIO_FORCE, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
@@ -1810,7 +1810,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			bPendingTimerUpdateList_ = false;
 			lastCalcText_.clear();
 			commentWindow_.SetStyle(s_.commentFontName, s_.commentFontNameMulti, s_.commentFontNameEmoji, s_.bCommentFontBold, s_.bCommentFontAntiAlias,
-			                        s_.commentFontOutline, s_.bUseOsdCompositor, s_.bUseTexture, s_.bUseDrawingThread);
+				s_.commentFontOutline, s_.bUseOsdCompositor, s_.bUseTexture, s_.bUseDrawingThread);
 			commentWindow_.SetCommentSize(s_.commentSize, s_.commentSizeMin, s_.commentSizeMax, s_.commentLineMargin);
 			commentWindow_.SetDisplayDuration(s_.commentDuration);
 			commentWindow_.SetDrawLineCount(s_.commentDrawLineCount);
@@ -1848,17 +1848,20 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			PostMessage(hwnd, WM_TIMER, TIMER_JK_WATCHDOG, 0);
 			if (hPanel_) {
 				// パネルウィンドウに連動
-				DeleteBrush(SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND,
-					reinterpret_cast<LONG_PTR>(CreateSolidBrush(m_pApp->GetColor(L"PanelBack")))));
+				panelColor_.SetColor(m_pApp);// カラーデータのキャッシュを作成
+
+				UpdateWindowTheme(hwnd);
+				
 				GetClientRect(hPanel_, &s_.rcForce);
-			} else {
+			}
+			else {
 				// 位置を復元
 				HMONITOR hMon = MonitorFromRect(&s_.rcForce, MONITOR_DEFAULTTONEAREST);
 				MONITORINFO mi;
 				mi.cbSize = sizeof(MONITORINFO);
 				if (s_.rcForce.right <= s_.rcForce.left || !GetMonitorInfo(hMon, &mi) ||
-				    s_.rcForce.right < mi.rcMonitor.left + 20 || mi.rcMonitor.right - 20 < s_.rcForce.left ||
-				    s_.rcForce.bottom < mi.rcMonitor.top + 20 || mi.rcMonitor.bottom - 20 < s_.rcForce.top) {
+					s_.rcForce.right < mi.rcMonitor.left + 20 || mi.rcMonitor.right - 20 < s_.rcForce.left ||
+					s_.rcForce.bottom < mi.rcMonitor.top + 20 || mi.rcMonitor.bottom - 20 < s_.rcForce.top) {
 					GetWindowRect(hwnd, &s_.rcForce);
 				}
 			}
@@ -1900,94 +1903,102 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		}
 		return FALSE;
 	case WM_DESTROY:
-		{
-			// パネルアイテムのサブクラス化を解除
-			if (hPanel_) {
-				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_RADIO_FORCE));
-				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_RADIO_LOG));
-				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_CHECK_SPECFILE));
-				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_CHECK_RELATIVE));
-			}
-			// 投稿欄のサブクラス化を解除
-			COMBOBOXINFO cbi = {};
-			cbi.cbSize = sizeof(cbi);
-			if (GetComboBoxInfo(GetDlgItem(hwnd, IDC_CB_POST), &cbi)) {
-				SetWindowLongPtr(cbi.hwndItem, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GetProp(cbi.hwndItem, TEXT("DefProc"))));
-				RemoveProp(cbi.hwndItem, TEXT("DefProc"));
-				RemoveProp(cbi.hwndItem, TEXT("Root"));
-			}
-			// 勢いリストのサブクラス化を解除
-			HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
-			SetWindowLongPtr(hList, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GetProp(hList, TEXT("DefProc"))));
-			RemoveProp(hList, TEXT("DefProc"));
-
-			// 位置を保存
-			GetWindowRect(hwnd, &s_.rcForce);
-			s_.commentOpacity = (s_.commentOpacity&~0xFF) | commentWindow_.GetOpacity();
-			s_.bSetRelative = SendDlgItemMessage(hwnd, IDC_CHECK_RELATIVE, BM_GETCHECK, 0, 0) == BST_CHECKED;
-			// ログファイルを閉じる
-			WriteToLogfile(-1);
-			ReadFromLogfile(-1);
-			if (bSpecFile_) {
-				DeleteFile(tmpSpecFileName_.c_str());
-			}
-			commentWindow_.Destroy();
-
-			channelStream_.BeginClose();
-			jkStream_.BeginClose();
-			channelStream_.Close();
-			jkStream_.Close();
-			currentJK_ = -1;
-
-			if (syncThread_.joinable()) {
-				bQuitSyncThread_ = true;
-				syncThread_.join();
-			}
-			ToggleStreamCallback(false);
-			m_pApp->SetWindowMessageCallback(nullptr);
-			SaveToIni();
-			m_pApp->SetPluginCommandState(COMMAND_HIDE_FORCE, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
-			m_pApp->SetPluginCommandState(COMMAND_HIDE_COMMENT, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
-			hForce_ = nullptr;
+	{
+		// パネルアイテムのサブクラス化を解除
+		if (hPanel_) {
+			ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_RADIO_FORCE));
+			ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_RADIO_LOG));
+			ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_CHECK_SPECFILE));
+			ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_CHECK_RELATIVE));
 		}
-		break;
+		// 投稿欄のサブクラス化を解除
+		COMBOBOXINFO cbi = {};
+		cbi.cbSize = sizeof(cbi);
+		if (GetComboBoxInfo(GetDlgItem(hwnd, IDC_CB_POST), &cbi)) {
+			SetWindowLongPtr(cbi.hwndItem, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GetProp(cbi.hwndItem, TEXT("DefProc"))));
+			RemoveProp(cbi.hwndItem, TEXT("DefProc"));
+			RemoveProp(cbi.hwndItem, TEXT("Root"));
+		}
+		// 勢いリストのサブクラス化を解除
+		HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
+		SetWindowLongPtr(hList, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GetProp(hList, TEXT("DefProc"))));
+		RemoveProp(hList, TEXT("DefProc"));
+
+		// 位置を保存
+		GetWindowRect(hwnd, &s_.rcForce);
+		s_.commentOpacity = (s_.commentOpacity & ~0xFF) | commentWindow_.GetOpacity();
+		s_.bSetRelative = SendDlgItemMessage(hwnd, IDC_CHECK_RELATIVE, BM_GETCHECK, 0, 0) == BST_CHECKED;
+		// ログファイルを閉じる
+		WriteToLogfile(-1);
+		ReadFromLogfile(-1);
+		if (bSpecFile_) {
+			DeleteFile(tmpSpecFileName_.c_str());
+		}
+		commentWindow_.Destroy();
+
+		channelStream_.BeginClose();
+		jkStream_.BeginClose();
+		channelStream_.Close();
+		jkStream_.Close();
+		currentJK_ = -1;
+
+		if (syncThread_.joinable()) {
+			bQuitSyncThread_ = true;
+			syncThread_.join();
+		}
+		ToggleStreamCallback(false);
+		m_pApp->SetWindowMessageCallback(nullptr);
+		SaveToIni();
+		m_pApp->SetPluginCommandState(COMMAND_HIDE_FORCE, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
+		m_pApp->SetPluginCommandState(COMMAND_HIDE_COMMENT, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
+		hForce_ = nullptr;
+	}
+	break;
+	case WM_ERASEBKGND:// TVTest::EVENT_COLORCHANGEの処理をここで行う
+	{
+		if (panelColor_.DelaySetColor(m_pApp))
+		{
+			UpdateWindowTheme();
+		}
+	}
+	break;
 	case WM_MEASUREITEM:
-		{
-			LPMEASUREITEMSTRUCT lpmis = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
-			if (lpmis->CtlID == IDC_FORCELIST && hForceFont_) {
-				HWND hItem = GetDlgItem(hwnd, IDC_FORCELIST);
-				HDC hdc = GetDC(hItem);
-				HFONT hFontOld = SelectFont(hdc, hForceFont_);
-				TEXTMETRIC tm;
-				GetTextMetrics(hdc, &tm);
-				SelectFont(hdc, hFontOld);
-				ReleaseDC(hItem, hdc);
-				lpmis->itemHeight = tm.tmHeight + 1;
-				return TRUE;
-			}
+	{
+		LPMEASUREITEMSTRUCT lpmis = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
+		if (lpmis->CtlID == IDC_FORCELIST && hForceFont_) {
+			HWND hItem = GetDlgItem(hwnd, IDC_FORCELIST);
+			HDC hdc = GetDC(hItem);
+			HFONT hFontOld = SelectFont(hdc, hForceFont_);
+			TEXTMETRIC tm;
+			GetTextMetrics(hdc, &tm);
+			SelectFont(hdc, hFontOld);
+			ReleaseDC(hItem, hdc);
+			lpmis->itemHeight = tm.tmHeight + 1;
+			return TRUE;
 		}
-		break;
+	}
+	break;
 	case WM_CLOSE:
 		// 隠すだけ
 		ShowWindow(hwnd, SW_HIDE);
 		return 0;
 	case WM_DROPFILES:
-		{
-			dropFileTimeout_ = 0;
-			std::vector<TCHAR> buf(DragQueryFile(reinterpret_cast<HDROP>(wParam), 0, nullptr, 0) + 1);
-			if (DragQueryFile(reinterpret_cast<HDROP>(wParam), 0, buf.data(), (UINT)buf.size())) {
-				dropFileName_ = buf.data();
-				if (bSpecFile_) {
-					ReadFromLogfile(-1);
-					DeleteFile(tmpSpecFileName_.c_str());
-					bSpecFile_ = false;
-				}
-				SendDlgItemMessage(hwnd, IDC_CHECK_SPECFILE, BM_SETCHECK, BST_UNCHECKED, 0);
-				dropFileTimeout_ = 1;
-				SetTimer(hwnd, TIMER_OPEN_DROPFILE, 0, nullptr);
+	{
+		dropFileTimeout_ = 0;
+		std::vector<TCHAR> buf(DragQueryFile(reinterpret_cast<HDROP>(wParam), 0, nullptr, 0) + 1);
+		if (DragQueryFile(reinterpret_cast<HDROP>(wParam), 0, buf.data(), (UINT)buf.size())) {
+			dropFileName_ = buf.data();
+			if (bSpecFile_) {
+				ReadFromLogfile(-1);
+				DeleteFile(tmpSpecFileName_.c_str());
+				bSpecFile_ = false;
 			}
+			SendDlgItemMessage(hwnd, IDC_CHECK_SPECFILE, BM_SETCHECK, BST_UNCHECKED, 0);
+			dropFileTimeout_ = 1;
+			SetTimer(hwnd, TIMER_OPEN_DROPFILE, 0, nullptr);
 		}
-		break;
+	}
+	break;
 	case WM_HSCROLL:
 		if (reinterpret_cast<HWND>(lParam) == GetDlgItem(hwnd, IDC_SLIDER_OPACITY) && LOWORD(wParam) == SB_THUMBTRACK) {
 			BYTE newOpacity = static_cast<BYTE>(HIWORD(wParam) * 255 / 10);
@@ -1996,7 +2007,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				HWND hwndContainer = FindVideoContainer();
 				commentWindow_.Create(hwndContainer);
 				bHalfSkip_ = GetWindowHeight(hwndContainer) >= s_.halfSkipThreshold;
-			} else if (commentWindow_.GetOpacity() != 0 && newOpacity == 0) {
+			}
+			else if (commentWindow_.GetOpacity() != 0 && newOpacity == 0) {
 				commentWindow_.Destroy();
 			}
 			commentWindow_.SetOpacity(newOpacity);
@@ -2007,78 +2019,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		{
 			LPDRAWITEMSTRUCT lpdis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
 			if (lpdis->CtlType == ODT_LISTBOX) {
-				bool bSelected = (lpdis->itemState & ODS_SELECTED) != 0;
-				HBRUSH hbr = CreateSolidBrush(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : GetBkColor(lpdis->hDC));
-				FillRect(lpdis->hDC, &lpdis->rcItem, hbr);
-				DeleteBrush(hbr);
-
-				TCHAR text[1024];
-				if (ListBox_GetTextLen(lpdis->hwndItem, lpdis->itemID) < _countof(text)) {
-					int textLen = ListBox_GetText(lpdis->hwndItem, lpdis->itemID, text);
-					if (textLen >= 0) {
-						LPCTSTR pText = text;
-						bool bEmphasis = false;
-						if (pText[0] == TEXT('#')) {
-							// 文字列の強調色表示
-							bEmphasis = true;
-							++pText;
-						}
-						COLORREF crBk = RGB(0xFF, 0xFF, 0xFF);
-						if (pText[0] == TEXT('[')) {
-							// 右側文字列の背景色指定
-							LPCTSTR p = _tcschr(++pText, TEXT(']'));
-							if (p) {
-								crBk = _tcstol(pText, nullptr, 10);
-								pText = p + 1;
-							}
-						}
-						int oldBkMode = SetBkMode(lpdis->hDC, TRANSPARENT);
-						COLORREF crOld = SetTextColor(lpdis->hDC, bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) :
-						                                          bEmphasis ? RGB(0xFF, 0, 0) : GetTextColor(lpdis->hDC));
-						RECT rc = lpdis->rcItem;
-						rc.left += 1;
-						if (pText[0] == TEXT('{')) {
-							// 左側文字列の描画幅指定
-							size_t fixedLen = _tcscspn(&pText[1], TEXT("}"));
-							if (text + textLen >= pText + 2 + 2 * fixedLen) {
-								tstring calcText(&pText[1], &pText[1 + fixedLen]);
-								tstring drawText(&pText[2 + fixedLen], &pText[2 + 2 * fixedLen]);
-								pText += 2 + 2 * fixedLen;
-								int mask = s_.headerMask;
-								for (size_t i = 0; i < calcText.size(); mask >>= 1) {
-									if (mask & 1) {
-										calcText.erase(i, 1);
-										drawText.erase(i, 1);
-									} else {
-										++i;
-									}
-								}
-								if (!calcText.empty()) {
-									if (lastCalcText_ != calcText) {
-										RECT rcCalc = rc;
-										DrawText(lpdis->hDC, calcText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
-										lastCalcText_ = calcText;
-										lastCalcWidth_ = rcCalc.right - rcCalc.left;
-									}
-									DrawText(lpdis->hDC, drawText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-									rc.left += lastCalcWidth_;
-								}
-							}
-						}
-						COLORREF crBkOld = SetBkColor(lpdis->hDC, crBk);
-						if (!bSelected && crBk != RGB(0xFF, 0xFF, 0xFF)) {
-							SetBkMode(lpdis->hDC, OPAQUE);
-							// TODO: ホントは黒文字を仮定してはいけない(ハイコントラストテーマとか)
-							if (3*GetRValue(crBk) + 6*GetGValue(crBk) + GetBValue(crBk) < 255) {
-								SetTextColor(lpdis->hDC, RGB(0xFF, 0xFF, 0xFF));
-							}
-						}
-						DrawText(lpdis->hDC, pText, -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-						SetBkColor(lpdis->hDC, crBkOld);
-						SetTextColor(lpdis->hDC, crOld);
-						SetBkMode(lpdis->hDC, oldBkMode);
-					}
-				}
+				DrawListbox(lpdis);
+				return TRUE;
+			}
+			else if (lpdis->CtlType == ODT_COMBOBOX)
+			{
+				DrawCombobox(lpdis);
 				return TRUE;
 			}
 		}
@@ -2087,7 +2033,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		switch (LOWORD(wParam)) {
 		case IDC_RADIO_FORCE:
 		case IDC_RADIO_LOG:
-			bDisplayLogList_ = SendDlgItemMessage(hwnd, IDC_RADIO_LOG, BM_GETCHECK, 0, 0 ) == BST_CHECKED;
+			bDisplayLogList_ = SendDlgItemMessage(hwnd, IDC_RADIO_LOG, BM_GETCHECK, 0, 0) == BST_CHECKED;
 			SendMessage(hwnd, WM_UPDATE_LIST, TRUE, 0);
 			PostMessage(hwnd, WM_TIMER, TIMER_UPDATE, 0);
 			break;
@@ -2097,14 +2043,15 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					ReadFromLogfile(-1);
 					DeleteFile(tmpSpecFileName_.c_str());
 					bSpecFile_ = false;
-				} else {
+				}
+				else {
 					LONGLONG llft = 0;
 					TCHAR path[MAX_PATH];
 					bool bRel = SendDlgItemMessage(hwnd, IDC_CHECK_RELATIVE, BM_GETCHECK, 0, 0) == BST_CHECKED;
 					// ダイアログを開いている間にD&Dされるかもしれない
 					if ((!bRel || (llft = GetCurrentTot()) >= 0) &&
-					    FileOpenDialog(hwnd, TEXT("実況ログ(*.jkl;*.xml)\0*.jkl;*.xml\0すべてのファイル\0*.*\0"), path, _countof(path)) &&
-					    !bSpecFile_ && ImportLogfile(path, tmpSpecFileName_.c_str(), bRel ? FileTimeToUnixTime(llft) + 2 : 0))
+						FileOpenDialog(hwnd, TEXT("実況ログ(*.jkl;*.xml)\0*.jkl;*.xml\0すべてのファイル\0*.*\0"), path, _countof(path)) &&
+						!bSpecFile_ && ImportLogfile(path, tmpSpecFileName_.c_str(), bRel ? FileTimeToUnixTime(llft) + 2 : 0))
 					{
 						readLogfileTick_ = GetTickCount();
 						bSpecFile_ = true;
@@ -2117,10 +2064,10 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			if (HIWORD(wParam) == LBN_SELCHANGE) {
 				if (!bDisplayLogList_) {
 					// 勢いリスト表示中
-					int index = ListBox_GetCurSel((HWND)lParam);
-					int jkID = -1;
-					if (0 <= index && index < (int)forceList_.size()) {
-						jkID = forceList_[index].jkID;
+				int index = ListBox_GetCurSel((HWND)lParam);
+				int jkID = -1;
+				if (0 <= index && index < (int)forceList_.size()) {
+					jkID = forceList_[index].jkID;
 					}
 					if (currentJKToGet_ != jkID) {
 						currentJKToGet_ = jkID;
@@ -2853,6 +2800,144 @@ BOOL CALLBACK CNicoJK::StreamCallback(BYTE *pData, void *pClientData)
 		}
 	}
 	return TRUE;
+}
+
+//オーナードロー関数
+void CNicoJK::DrawListbox(LPDRAWITEMSTRUCT lpdis)
+{
+	bool bSelected = (lpdis->itemState & ODS_SELECTED) != 0;
+	COLORREF bkColor = bSelected ? this->panelColor_.GetPanelCurTabBack() : this->panelColor_.GetPanelBack();
+
+	FillRect(lpdis->hDC, &lpdis->rcItem
+		, bSelected ? this->panelColor_.GetPanelCurTabBackBrush() : this->panelColor_.GetPanelBackBrush());
+
+	TCHAR text[1024];
+	if (ListBox_GetTextLen(lpdis->hwndItem, lpdis->itemID) < _countof(text)) {
+		int textLen = ListBox_GetText(lpdis->hwndItem, lpdis->itemID, text);
+		if (textLen >= 0) {
+			LPCTSTR pText = text;
+			bool bEmphasis = false;
+			if (pText[0] == TEXT('#')) {
+				// 文字列の強調色表示
+				bEmphasis = true;
+				++pText;
+			}
+			COLORREF crBk = bkColor;
+			if (pText[0] == TEXT('[')) {
+				// 右側文字列の背景色指定
+				LPCTSTR p = _tcschr(++pText, TEXT(']'));
+				if (p) {
+					crBk = _tcstol(pText, nullptr, 10);
+					pText = p + 1;
+				}
+			}
+			int oldBkMode = SetBkMode(lpdis->hDC, TRANSPARENT);
+			COLORREF crOld = SetTextColor(lpdis->hDC,
+				bSelected ? this->panelColor_.GetPanelCurTabText() :
+				bEmphasis ? RGB(0xFF, 0, 0) : this->panelColor_.GetPanelText());
+
+			RECT rc = lpdis->rcItem;
+			rc.left += 1;
+			if (pText[0] == TEXT('{')) {
+				// 左側文字列の描画幅指定
+				size_t fixedLen = _tcscspn(&pText[1], TEXT("}"));
+				if (text + textLen >= pText + 2 + 2 * fixedLen) {
+					tstring calcText(&pText[1], &pText[1 + fixedLen]);
+					tstring drawText(&pText[2 + fixedLen], &pText[2 + 2 * fixedLen]);
+					pText += 2 + 2 * fixedLen;
+					int mask = s_.headerMask;
+					for (size_t i = 0; i < calcText.size(); mask >>= 1) {
+						if (mask & 1) {
+							calcText.erase(i, 1);
+							drawText.erase(i, 1);
+						}
+						else {
+							++i;
+						}
+					}
+					if (!calcText.empty()) {
+						if (lastCalcText_ != calcText) {
+							RECT rcCalc = rc;
+							DrawText(lpdis->hDC, calcText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
+							lastCalcText_ = calcText;
+							lastCalcWidth_ = rcCalc.right - rcCalc.left;
+						}
+						DrawText(lpdis->hDC, drawText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+						rc.left += lastCalcWidth_;
+					}
+				}
+			}
+			COLORREF crBkOld = SetBkColor(lpdis->hDC, bkColor);
+			if (!bSelected && bkColor != this->panelColor_.GetPanelText()) {
+				SetBkMode(lpdis->hDC, OPAQUE);
+				// TODO: ホントは黒文字を仮定してはいけない(ハイコントラストテーマとか)
+				if (3 * GetRValue(crBk) + 6 * GetGValue(crBk) + GetBValue(crBk) < 255) {
+					SetTextColor(lpdis->hDC, RGB(0xFF, 0xFF, 0xFF));
+				}
+			}
+			DrawText(lpdis->hDC, pText, -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+			SetBkColor(lpdis->hDC, crBkOld);
+			SetTextColor(lpdis->hDC, crOld);
+			SetBkMode(lpdis->hDC, oldBkMode);
+		}
+	}
+}
+
+void CNicoJK::DrawCombobox(LPDRAWITEMSTRUCT lpdis)
+{
+	bool bSelected = (lpdis->itemState & ODS_SELECTED) != 0;
+
+	FillRect(lpdis->hDC, &lpdis->rcItem, bSelected ? this->panelColor_.GetPanelCurTabBackBrush() : this->panelColor_.GetPanelBackBrush());
+
+	TCHAR text[128];
+
+	if (ComboBox_GetLBTextLen(lpdis->hwndItem, lpdis->itemID) < _countof(text))
+	{
+		int textLen = ComboBox_GetLBText(lpdis->hwndItem, lpdis->itemID, text);
+		if (textLen > 0)
+		{
+			int oldBkMode = SetBkMode(lpdis->hDC, TRANSPARENT);
+			COLORREF crOld = SetTextColor(lpdis->hDC
+				, bSelected ? this->panelColor_.GetPanelCurTabText() : this->panelColor_.GetPanelText());
+
+			RECT rc = lpdis->rcItem;
+			rc.left += 1;
+
+			DrawText(lpdis->hDC, text, -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+
+			SetTextColor(lpdis->hDC, crOld);
+			SetBkMode(lpdis->hDC, oldBkMode);
+		}
+	}
+}
+
+// ウィンドウのテーマを更新する
+void CNicoJK::UpdateWindowTheme(HWND hwnd)// hwndはhForce_が未設定のForceWindowProcMain::WM_CREATE内でのみ使用
+{
+	COLORREF bkColor = m_pApp->GetColor(L"PanelBack");
+
+	if (m_pApp->GetDarkModeStatus() & TVTest::DARK_MODE_STATUS_PANEL_SUPPORTED) {
+
+		const bool fDark = m_pApp->IsDarkModeColor(bkColor);
+
+		m_pApp->SetWindowDarkMode(hListbox_, fDark);
+
+		for (HWND hChild = NULL;
+			(hChild=::FindWindowEx(hCombobox_, hChild, NULL, NULL)) != NULL;)// Comboboxの子ウインドウに直接設定する
+		{
+			m_pApp->SetWindowDarkMode(hChild, fDark);
+		}
+		m_pApp->SetWindowDarkMode(hCombobox_, fDark);
+	}
+	
+	// 背景ブラシを設定する
+	::DeleteBrush(
+		::SetClassLongPtr(
+			(hwnd == NULL) ? hForce_ : hwnd
+			, GCLP_HBRBACKGROUND
+			, reinterpret_cast<LONG_PTR>(CreateSolidBrush(bkColor))
+		)
+	);
 }
 
 TVTest::CTVTestPlugin *CreatePluginClass()

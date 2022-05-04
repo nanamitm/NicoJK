@@ -3,6 +3,78 @@
 #include <atomic>
 #include <thread>
 
+// パネルカラーリソース管理クラス（リソースキャッシュ）
+class CNicoJKPanelColor
+{
+public:
+	CNicoJKPanelColor()
+		: m_PanelText(0)
+		, m_PanelBack(0)
+		, m_PanelCurTabText(0)
+		, m_PanelCurTabBack(0)
+		, m_PanelBackBrush(NULL)
+		, m_PanelCurTabBackBrush(NULL)
+		, m_DelaySetColor(false)
+	{
+	};
+
+	~CNicoJKPanelColor()
+	{
+		if (m_PanelBackBrush) DeleteBrush(m_PanelBackBrush);
+		if (m_PanelCurTabBackBrush) DeleteBrush(m_PanelCurTabBackBrush);
+	};
+
+	bool SetColor(TVTest::CTVTestApp* pApp)
+	{
+		if (pApp == NULL) return false;
+
+		m_PanelText = pApp->GetColor(L"PanelText");
+		m_PanelBack = pApp->GetColor(L"PanelBack");
+		m_PanelCurTabText = pApp->GetColor(L"PanelCurTabText");
+		m_PanelCurTabBack = pApp->GetColor(L"PanelCurTabBack");
+
+		if (m_PanelBackBrush) DeleteBrush(m_PanelBackBrush);
+		m_PanelBackBrush = CreateSolidBrush(m_PanelBack);
+
+		if (m_PanelCurTabBackBrush) DeleteBrush(m_PanelCurTabBackBrush);
+		m_PanelCurTabBackBrush = CreateSolidBrush(m_PanelCurTabBack);
+
+		return true;
+	};
+
+	void SetDelaySetColorFlag(void) { m_DelaySetColor = true; };
+	bool DelaySetColor(TVTest::CTVTestApp* pApp)
+	{
+		if (m_DelaySetColor)
+		{
+			return m_DelaySetColor = SetColor(pApp);
+		}
+		return false;
+	}
+
+	COLORREF GetPanelText(void) { return m_PanelText; };
+	COLORREF GetPanelBack(void) { return m_PanelBack; };
+	COLORREF GetPanelCurTabText(void) { return m_PanelCurTabText; };
+	COLORREF GetPanelCurTabBack(void) { return m_PanelCurTabBack; };
+
+	HBRUSH GetPanelBackBrush(void) { return m_PanelBackBrush; };
+	HBRUSH GetPanelCurTabBackBrush(void){ return m_PanelCurTabBackBrush;};
+
+protected:
+	COLORREF m_PanelText;
+	COLORREF m_PanelBack;
+	COLORREF m_PanelCurTabText;
+	COLORREF m_PanelCurTabBack;
+
+	HBRUSH m_PanelBackBrush;
+	HBRUSH m_PanelCurTabBackBrush;
+
+	bool m_DelaySetColor;
+	// TVTest設定ダイアログ（テーマ/配色）内で色変更した後、キャンセルボタンでテーマを復元した時に
+	// TVTest::EVENT_COLORCHANGメッセージハンドラ内でGetColor()を使用すると復元前のテーマ色が返ってくるため
+	// 常にメッセージハンドラ内ではフラグのみを設定し実際の処理はWM_ERASEBKGNDでを行う事で対処する
+};
+
 // プラグインクラス
 class CNicoJK : public TVTest::CTVTestPlugin
 {
@@ -134,6 +206,15 @@ private:
 	LRESULT ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static BOOL CALLBACK StreamCallback(BYTE *pData, void *pClientData);
 
+	//オーナードロー関数
+	void DrawListbox(LPDRAWITEMSTRUCT lpdis);
+	void DrawCombobox(LPDRAWITEMSTRUCT lpdis);
+	
+	//ダークモード対応
+	void UpdateWindowTheme(HWND hwnd=NULL);// hwndはhForce_が未設定のForceWindowProcMain::WM_CREATE内でのみ使用
+	HWND hListbox_;
+	HWND hCombobox_;
+
 	// 設定ファイルの名前
 	tstring iniFileName_;
 	SETTINGS s_;
@@ -154,6 +235,7 @@ private:
 	DWORD lastUpdateListTick_;
 	tstring lastCalcText_;
 	int lastCalcWidth_;
+	CNicoJKPanelColor panelColor_;
 
 	// コメント描画ウィンドウ
 	CCommentWindow commentWindow_;

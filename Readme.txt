@@ -81,19 +81,11 @@ NicoJK.iniを確認してください。
 パネルのNicoJKタブのテーマ/配色は"操作パネル"の設定に連動します。
 
 ■テスト環境
-Win7 sp1 + PT2/PT3 + ptTimer + BonDriver_ptmr.dll + TVTest 0.7.19(x86)
-※このフォークのテスト環境はWindows10 TVTest 0.10.0-dev(x64)
-
-■配布
-http://www.rutice.net/
-古いやつは↓
-https://github.com/rutice/NicoJK/downloads
-リンクする場合は、配布ページか、ソースコードのページへお願いします。
-※このフォークの配布ページは https://github.com/xtne6f/NicoJK/releases
+Windows11 TVTest 0.10.0-dev(x64)
 
 ■ソースコード
-https://github.com/rutice/NicoJK
-※このフォークのソースコードは https://github.com/xt4ubq/NicoJK
+https://github.com/nanamitm/NicoJK
+※このフォーク元のソースコードは https://github.com/rutice/NicoJK
 
 ■ログの仕様(開発者むけ)
 ルートフォルダに"jk{実況番号}"というフォルダ(jkフォルダ)を作成する。jkフォルダに
