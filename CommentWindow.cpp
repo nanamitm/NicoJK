@@ -4,13 +4,36 @@
 #include <functional>
 #include <emmintrin.h>
 #include <gdiplus.h>
+#include <d2d1.h>
+#include <d2d1helper.h>
+#include <dwrite_2.h>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
+
+// Windows 8.1 未満の SDK でも定義されるようにフォールバック
+#ifndef DWRITE_E_NOCOLOR
+#define DWRITE_E_NOCOLOR ((HRESULT)0x88985004L)
+#endif
 
 #ifndef ASSERT
 #include <cassert>
 #define ASSERT assert
 #endif
+
+/* カラー絵文字の動作フロー
+  GDI+ 描画スコープ
+	├─ 通常テキスト → GDI+ DrawString（従来通り）
+	└─ 絵文字セグメント → スキップ（透明ギャップ）+ EmojiDrawCall 収集
+
+  GDI+ スコープ終了（hbmWork_ はまだ選択中）
+	└─ FlushColorEmoji()
+		 └─ D2D BindDC → BeginDraw → IDWriteTextLayout::Draw
+			  └─ ColorEmojiTextRenderer::DrawGlyphRun
+				   ├─ COLR/CBDT フォント → TranslateColorGlyphRun でレイヤー描画
+				   └─ フォールバック → 単色描画
+*/
 
 namespace
 {
@@ -62,6 +85,81 @@ void ApplyOpacity(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB, bool 
 }
 
 extern const int EMOJI_RANGE_TABLE[100];
+
+// IDWriteTextRenderer の最小実装。COLR/CBDT カラー絵文字を ID2D1RenderTarget に描画する
+class ColorEmojiTextRenderer : public IDWriteTextRenderer
+{
+public:
+	ColorEmojiTextRenderer(IDWriteFactory2 *pFactory, ID2D1RenderTarget *pRT, D2D1_COLOR_F color)
+		: pFactory_(pFactory), pRT_(pRT), color_(color), refCount_(1) {}
+
+	// IUnknown (スタック割り当てなので delete しない)
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount_; }
+	ULONG STDMETHODCALLTYPE Release() override { return --refCount_; }
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
+		if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWritePixelSnapping) || riid == __uuidof(IDWriteTextRenderer)) {
+			*ppv = this; AddRef(); return S_OK;
+		}
+		*ppv = nullptr; return E_NOINTERFACE;
+	}
+
+	// IDWritePixelSnapping
+	HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL *isDisabled) override {
+		*isDisabled = FALSE; return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX *transform) override {
+		pRT_->GetTransform(reinterpret_cast<D2D1_MATRIX_3X2_F*>(transform)); return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT *ppd) override {
+		float x, y; pRT_->GetDpi(&x, &y); *ppd = y / 96.0f; return S_OK;
+	}
+
+	// IDWriteTextRenderer
+	HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT originX, FLOAT originY,
+		DWRITE_MEASURING_MODE mode, DWRITE_GLYPH_RUN const *run,
+		DWRITE_GLYPH_RUN_DESCRIPTION const *desc, IUnknown*) override
+	{
+		IDWriteColorGlyphRunEnumerator *pEnum = nullptr;
+		HRESULT hr = pFactory_->TranslateColorGlyphRun(originX, originY, run, desc, mode, nullptr, 0, &pEnum);
+		if (hr == DWRITE_E_NOCOLOR || FAILED(hr)) {
+			// カラーグリフなし → 単色で描画
+			ID2D1SolidColorBrush *pBrush = nullptr;
+			if (SUCCEEDED(pRT_->CreateSolidColorBrush(color_, &pBrush))) {
+				pRT_->DrawGlyphRun(D2D1::Point2F(originX, originY), run, pBrush, mode);
+				pBrush->Release();
+			}
+		} else {
+			// カラーレイヤーを順番に描画
+			BOOL hasRun = FALSE;
+			while (SUCCEEDED(pEnum->MoveNext(&hasRun)) && hasRun) {
+				const DWRITE_COLOR_GLYPH_RUN *pColorRun = nullptr;
+				pEnum->GetCurrentRun(&pColorRun);
+				D2D1_COLOR_F col = (pColorRun->paletteIndex == 0xFFFF) ? color_ :
+					D2D1::ColorF(pColorRun->runColor.r, pColorRun->runColor.g,
+					             pColorRun->runColor.b, pColorRun->runColor.a);
+				ID2D1SolidColorBrush *pBrush = nullptr;
+				if (SUCCEEDED(pRT_->CreateSolidColorBrush(col, &pBrush))) {
+					pRT_->DrawGlyphRun(
+						D2D1::Point2F(pColorRun->baselineOriginX, pColorRun->baselineOriginY),
+						&pColorRun->glyphRun, pBrush, mode);
+					pBrush->Release();
+				}
+			}
+			pEnum->Release();
+		}
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, DWRITE_UNDERLINE const*, IUnknown*) override { return S_OK; }
+	HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, DWRITE_STRIKETHROUGH const*, IUnknown*) override { return S_OK; }
+	HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
+
+private:
+	IDWriteFactory2 *pFactory_;
+	ID2D1RenderTarget *pRT_;
+	D2D1_COLOR_F color_;
+	ULONG refCount_;
+};
 
 bool MeasureString(Gdiplus::Graphics &g, const tstring &text, const Gdiplus::Font &font, const Gdiplus::Font &fontEmoji,
                    Gdiplus::REAL lineHeight, Gdiplus::PointF origin, Gdiplus::RectF *boundingBox = nullptr,
@@ -198,6 +296,21 @@ bool CCommentWindow::Initialize(HINSTANCE hinst, bool *pbEnableOsdCompositor, bo
 		}
 
 		bSse2Available_ = IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE) != FALSE;
+
+		// Direct2D / DirectWrite 初期化 (カラー絵文字対応)
+		D2D1_FACTORY_OPTIONS d2dOpts = {};
+		if (SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+		                                __uuidof(ID2D1Factory), &d2dOpts,
+		                                reinterpret_cast<void**>(&pD2DFactory_)))) {
+			// 96 DPI 固定で作成し D2D 座標 = ピクセル座標とする
+			D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+				D2D1_RENDER_TARGET_TYPE_DEFAULT,
+				D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+				96.0f, 96.0f);
+			pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
+		}
+		DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
+		                    reinterpret_cast<IUnknown**>(&pDWriteFactory_));
 	}
 	return true;
 }
@@ -210,6 +323,9 @@ void CCommentWindow::Finalize()
 		UnregisterClass(TEXT("ru.jk.comment"), hinst_);
 		hinst_ = nullptr;
 	}
+	if (pD2DTarget_) { pD2DTarget_->Release(); pD2DTarget_ = nullptr; }
+	if (pD2DFactory_) { pD2DFactory_->Release(); pD2DFactory_ = nullptr; }
+	if (pDWriteFactory_) { pDWriteFactory_->Release(); pDWriteFactory_ = nullptr; }
 }
 
 CCommentWindow::CCommentWindow()
@@ -249,6 +365,9 @@ CCommentWindow::CCommentWindow()
 	, currentTextureHeight_(0)
 	, bForceRefreshDirty_(false)
 	, debugFlags_(0)
+	, pDWriteFactory_(nullptr)
+	, pD2DFactory_(nullptr)
+	, pD2DTarget_(nullptr)
 {
 	fontName_[0] = TEXT('\0');
 	fontNameMulti_[0] = TEXT('\0');
@@ -693,6 +812,66 @@ bool CCommentWindow::WaitForIdleDrawingThread()
 	return !drawingThread_.joinable() || bQuitDrawingThread_ || WaitForSingleObject(hDrawingIdleEvent_, INFINITE) == WAIT_OBJECT_0;
 }
 
+// emojiDrawCalls_ に蓄積されたカラー絵文字を DirectWrite + D2D で描画する
+// GDI+スコープ終了後、hbmWork_ がまだ hdcWork_ に選択されている状態で呼ぶこと
+void CCommentWindow::FlushColorEmoji(int width, int height)
+{
+	if (!pD2DTarget_ || !pDWriteFactory_ || emojiDrawCalls_.empty()) {
+		emojiDrawCalls_.clear();
+		return;
+	}
+
+	RECT rc = {0, 0, width, height};
+	if (FAILED(pD2DTarget_->BindDC(hdcWork_, &rc))) {
+		emojiDrawCalls_.clear();
+		return;
+	}
+
+	LPCTSTR emojiFont = fontNameEmoji_[0] ? fontNameEmoji_ : fontName_;
+	DWRITE_FONT_WEIGHT weight = fontStyle_ ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
+
+	pD2DTarget_->BeginDraw();
+	pD2DTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+	for (const auto &call : emojiDrawCalls_) {
+		IDWriteTextFormat *pFmt = nullptr;
+		if (FAILED(pDWriteFactory_->CreateTextFormat(
+		        emojiFont, nullptr,
+		        weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+		        call.fontSize, L"", &pFmt))) {
+			continue;
+		}
+
+		IDWriteTextLayout *pLayout = nullptr;
+		HRESULT hr = pDWriteFactory_->CreateTextLayout(
+			call.text.c_str(), static_cast<UINT32>(call.text.size()),
+			pFmt, 10000.f, 10000.f, &pLayout);
+		pFmt->Release();
+		if (FAILED(hr)) continue;
+
+		D2D1_COLOR_F col = D2D1::ColorF(call.r / 255.f, call.g / 255.f,
+		                                 call.b / 255.f, call.a / 255.f);
+		ColorEmojiTextRenderer renderer(pDWriteFactory_, pD2DTarget_, col);
+		pLayout->Draw(nullptr, &renderer, call.x, call.y);
+		pLayout->Release();
+	}
+
+	// D2D_ERROR_RECREATE_TARGET など致命的エラー時はターゲットを再作成
+	if (FAILED(pD2DTarget_->EndDraw())) {
+		pD2DTarget_->Release();
+		pD2DTarget_ = nullptr;
+		D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+			D2D1_RENDER_TARGET_TYPE_DEFAULT,
+			D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+			96.0f, 96.0f);
+		if (pD2DFactory_) {
+			pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
+		}
+	}
+
+	emojiDrawCalls_.clear();
+}
+
 void CCommentWindow::UpdateChat()
 {
 	BITMAP bm;
@@ -719,7 +898,8 @@ void CCommentWindow::UpdateChat()
 		g.FillRectangle(&br, 0, rcUnused_.bottom, width, height - rcUnused_.bottom);
 		RECT rcLast = rcUnusedWoShita_;
 		bool bHasFirstDrawShita;
-		DrawChat(g, width, height, &rcUnused_, &rcUnusedWoShita_, &bHasFirstDrawShita);
+		DrawChat(g, width, height, &rcUnused_, &rcUnusedWoShita_, &bHasFirstDrawShita,
+		         bAntiAlias_ && pD2DTarget_ != nullptr);
 		// クリア+使用済み==ダーティ領域
 		IntersectRect(&rcDirty_, &rcLast, &rcUnusedWoShita_);
 		// 使用済み領域を積算
@@ -733,6 +913,10 @@ void CCommentWindow::UpdateChat()
 		}
 		SetRect(&rcDirty_, 0, rcDirty_.bottom<height && rcDirty_.top<=0 ? rcDirty_.bottom : 0,
 		        width, rcDirty_.bottom>=height ? rcDirty_.top : height);
+	}
+	// GDI+スコープ終了後、D2Dでカラー絵文字を上書き描画 (hbmWork_がまだ選択中の間に行う)
+	if (!emojiDrawCalls_.empty()) {
+		FlushColorEmoji(width, height);
 	}
 	SelectObject(hdcWork_, hbmOld);
 
@@ -759,8 +943,9 @@ BOOL CALLBACK CCommentWindow::UpdateCallback(void *pBits, const RECT *pSurfaceRe
 			// Premultにすると実測で10%程度軽いけどOsdCompositorは非Premultなので半透明部分がないときだけ使う
 			Gdiplus::Bitmap bitmap(width, height, pitch, !pThis->bAntiAlias_ ? PixelFormat32bppPARGB : PixelFormat32bppARGB, static_cast<BYTE*>(pBits));
 			Gdiplus::Graphics g(&bitmap);
-			pThis->DrawChat(g, width, height, &rcUnused, &rcUnusedWoShita, &bHasFirstDrawShita);
+			pThis->DrawChat(g, width, height, &rcUnused, &rcUnusedWoShita, &bHasFirstDrawShita); // OSDはD2D未対応
 		}
+		pThis->emojiDrawCalls_.clear(); // OSDパスでは収集した絵文字を破棄
 		if (pThis->opacity_ != 255 && pitch % 4 == 0) {
 			// 不透明度を適用
 			ApplyOpacity(static_cast<DWORD*>(pBits), pitch / 4 * rcUnused.top, pThis->opacity_, 255, pThis->bSse2Available_);
@@ -775,8 +960,9 @@ BOOL CALLBACK CCommentWindow::UpdateCallback(void *pBits, const RECT *pSurfaceRe
 // prcUnused: 描画しなかった(コメントの存在しない)領域を返す。left,rightフィールドは一応格納しているが意味はない
 // prcUnusedWoShita: 同上だが下コメを無視した領域を返す
 // pbHasFirstDrawShita: 初めて描画開始された下コメがあるかどうか返す
-void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT *prcUnused, RECT *prcUnusedWoShita, bool *pbHasFirstDrawShita)
+void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT *prcUnused, RECT *prcUnusedWoShita, bool *pbHasFirstDrawShita, bool bCollectEmojiForD2D)
 {
+	emojiDrawCalls_.clear();
 	{
 		// 最小・最大文字サイズに応じて表示ライン数を増減する
 		int lineCountMax = static_cast<int>(fontScale_ * height / commentSizeMin_);
@@ -792,11 +978,11 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 				// Premultの方がかなり軽負荷 (参考: http://www.codeproject.com/Tips/66909/Rendering-fast-with-GDI-What-to-do-and-what-not-to )
 				pTextureBitmap_ = new Gdiplus::Bitmap(textureWidth, height, PixelFormat32bppPARGB);
 				pgTexture_ = new Gdiplus::Graphics(pTextureBitmap_);
-				pgTexture_->SetTextRenderingHint(bAntiAlias_ ? Gdiplus::TextRenderingHintAntiAlias : Gdiplus::TextRenderingHintSingleBitPerPixel);
+				pgTexture_->SetTextRenderingHint(bAntiAlias_ ? Gdiplus::TextRenderingHintAntiAliasGridFit : Gdiplus::TextRenderingHintSingleBitPerPixel);
 				textureList_.clear();
 			}
 		}
-		g.SetTextRenderingHint(bAntiAlias_ ? Gdiplus::TextRenderingHintAntiAlias : Gdiplus::TextRenderingHintSingleBitPerPixel);
+		g.SetTextRenderingHint(bAntiAlias_ ? Gdiplus::TextRenderingHintAntiAliasGridFit : Gdiplus::TextRenderingHintSingleBitPerPixel);
 		Gdiplus::REAL fontEm = static_cast<Gdiplus::REAL>(fontScale_ * height / actLineCount);
 		Gdiplus::REAL fontEmSmall = static_cast<Gdiplus::REAL>(fontSmallScale_ * height / actLineCount);
 		int fontStyle = fontStyle_;
@@ -1049,9 +1235,16 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 					if (fontOutline_) {
 						grPath.Reset();
 						MeasureString(g, t.text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset / 2 + 1, shadowOffset / 2 + 1), nullptr,
-						              [fontStyle, selFontEm, &grPath, &selFont, &selFontFamily, &selFontFamilyEmoji](
+						              [fontStyle, selFontEm, &grPath, &selFont, &selFontFamily, &selFontFamilyEmoji,
+						               bCollectEmojiForD2D, &selFontEmoji, &t, foreColor, shadowOffset](
 						                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
-						                  grPath.AddString(text, len, &font == &selFont ? &selFontFamily : &selFontFamilyEmoji, fontStyle, selFontEm, origin, nullptr);
+						                  if (bCollectEmojiForD2D && &font == &selFontEmoji) {
+						                      float oo = shadowOffset / 2 + 1;
+						                      t.emojiCalls.push_back({tstring(text, static_cast<size_t>(len)), origin.X - oo, origin.Y - oo,
+						                                               selFontEm, foreColor.GetR(), foreColor.GetG(), foreColor.GetB(), foreColor.GetA()});
+						                  } else {
+						                      grPath.AddString(text, len, &font == &selFont ? &selFontFamily : &selFontFamilyEmoji, fontStyle, selFontEm, origin, nullptr);
+						                  }
 						              });
 						pgTexture_->SetCompositingMode(bOpaque ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 						pgTexture_->SetSmoothingMode(bAntiAlias_ ? Gdiplus::SmoothingModeHighQuality : Gdiplus::SmoothingModeNone);
@@ -1065,13 +1258,25 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 						Gdiplus::SolidBrush brShadow(shadowColor);
 						// Win7においてU+2588の上端1ピクセルはみ出す現象がみられたため+1
 						MeasureString(g, t.text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset, shadowOffset + 1), nullptr,
-						              [this, &brShadow](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
-						                  pgTexture_->DrawString(text, len, &font, origin, &brShadow);
+						              [this, &brShadow, bCollectEmojiForD2D, &selFontEmoji, selFontEm, &t, shadowColor](
+						                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+						                  if (bCollectEmojiForD2D && &font == &selFontEmoji) {
+						                      t.emojiCalls.push_back({tstring(text, static_cast<size_t>(len)), origin.X, origin.Y,
+						                                               selFontEm, shadowColor.GetR(), shadowColor.GetG(), shadowColor.GetB(), 255});
+						                  } else {
+						                      pgTexture_->DrawString(text, len, &font, origin, &brShadow);
+						                  }
 						              });
 						pgTexture_->SetCompositingMode(bAntiAlias_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 						MeasureString(g, t.text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(0, 1), nullptr,
-						              [this, &br](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
-						                  pgTexture_->DrawString(text, len, &font, origin, &br);
+						              [this, &br, bCollectEmojiForD2D, &selFontEmoji, selFontEm, &t, foreColor](
+						                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+						                  if (bCollectEmojiForD2D && &font == &selFontEmoji) {
+						                      t.emojiCalls.push_back({tstring(text, static_cast<size_t>(len)), origin.X, origin.Y,
+						                                               selFontEm, foreColor.GetR(), foreColor.GetG(), foreColor.GetB(), foreColor.GetA()});
+						                  } else {
+						                      pgTexture_->DrawString(text, len, &font, origin, &br);
+						                  }
 						              });
 					}
 					jt = textureList_.insert(jtMin, std::move(t));
@@ -1090,6 +1295,12 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 				g.DrawImage(pTextureBitmap_, px, py,
 				            jt->rc.left, jt->rc.top, jt->rc.right - jt->rc.left, jt->rc.bottom - jt->rc.top, Gdiplus::UnitPixel);
 				jt->bUsed = true;
+				// テクスチャ内の絵文字位置をスクリーン座標に変換して登録
+				if (bCollectEmojiForD2D) {
+					for (const auto &e : jt->emojiCalls) {
+						emojiDrawCalls_.push_back({e.text, e.x + px - jt->rc.left, e.y + py - jt->rc.top, e.fontSize, e.r, e.g, e.b, e.a});
+					}
+				}
 			} else {
 				if (bOpaque) {
 					Gdiplus::LinearGradientBrush brBack(Gdiplus::Rect(0, py - 1, 1, entireDrawHeight + 1),
@@ -1101,9 +1312,16 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 				if (fontOutline_) {
 					grPath.Reset();
 					MeasureString(g, it->text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset / 2 + 1, shadowOffset / 2 + 1), nullptr,
-					              [fontStyle, selFontEm, &grPath, &selFont, &selFontFamily, &selFontFamilyEmoji](
+					              [fontStyle, selFontEm, &grPath, &selFont, &selFontFamily, &selFontFamilyEmoji,
+					               bCollectEmojiForD2D, &selFontEmoji, this, foreColor, shadowOffset](
 					                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
-					                  grPath.AddString(text, len, &font == &selFont ? &selFontFamily : &selFontFamilyEmoji, fontStyle, selFontEm, origin, nullptr);
+					                  if (bCollectEmojiForD2D && &font == &selFontEmoji) {
+					                      float oo = shadowOffset / 2 + 1;
+					                      emojiDrawCalls_.push_back({tstring(text, static_cast<size_t>(len)), origin.X - oo, origin.Y - oo,
+					                                                   selFontEm, foreColor.GetR(), foreColor.GetG(), foreColor.GetB(), foreColor.GetA()});
+					                  } else {
+					                      grPath.AddString(text, len, &font == &selFont ? &selFontFamily : &selFontFamilyEmoji, fontStyle, selFontEm, origin, nullptr);
+					                  }
 					              });
 					g.SetCompositingMode(bAntiAlias_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 					g.SetSmoothingMode(bAntiAlias_ ? Gdiplus::SmoothingModeHighQuality : Gdiplus::SmoothingModeNone);
@@ -1115,12 +1333,24 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 					g.SetCompositingMode(bAntiAlias_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 					Gdiplus::SolidBrush brShadow(shadowColor);
 					MeasureString(g, it->text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset, shadowOffset + 1), nullptr,
-					              [&g, &brShadow](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
-					                  g.DrawString(text, len, &font, origin, &brShadow);
+					              [&g, &brShadow, bCollectEmojiForD2D, &selFontEmoji, selFontEm, this, shadowColor](
+					                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+					                  if (bCollectEmojiForD2D && &font == &selFontEmoji) {
+					                      emojiDrawCalls_.push_back({tstring(text, static_cast<size_t>(len)), origin.X, origin.Y,
+					                                                   selFontEm, shadowColor.GetR(), shadowColor.GetG(), shadowColor.GetB(), 255});
+					                  } else {
+					                      g.DrawString(text, len, &font, origin, &brShadow);
+					                  }
 					              });
 					MeasureString(g, it->text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(0, 1), nullptr,
-					              [&g, &br](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
-					                  g.DrawString(text, len, &font, origin, &br);
+					              [&g, &br, bCollectEmojiForD2D, &selFontEmoji, selFontEm, this, foreColor](
+					                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+					                  if (bCollectEmojiForD2D && &font == &selFontEmoji) {
+					                      emojiDrawCalls_.push_back({tstring(text, static_cast<size_t>(len)), origin.X, origin.Y,
+					                                                   selFontEm, foreColor.GetR(), foreColor.GetG(), foreColor.GetB(), foreColor.GetA()});
+					                  } else {
+					                      g.DrawString(text, len, &font, origin, &br);
+					                  }
 					              });
 				}
 			}

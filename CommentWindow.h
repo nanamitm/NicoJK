@@ -3,6 +3,12 @@
 #include "OsdCompositor.h"
 #include <atomic>
 #include <thread>
+#include <vector>
+
+// DirectWrite/Direct2D 前方宣言
+struct IDWriteFactory2;
+struct ID2D1Factory;
+struct ID2D1DCRenderTarget;
 
 namespace Gdiplus
 {
@@ -63,6 +69,14 @@ public:
 	void OnFilterGraphInitialized(IGraphBuilder *pGraphBuilder) { osdCompositor_.OnFilterGraphInitialized(pGraphBuilder); }
 	void OnFilterGraphFinalize(IGraphBuilder *pGraphBuilder) { osdCompositor_.OnFilterGraphFinalize(pGraphBuilder); }
 private:
+	// D2Dカラー絵文字描画用データ
+	struct EmojiDrawCall {
+		tstring text;
+		float x, y;
+		float fontSize;   // ピクセル単位のemサイズ
+		BYTE r, g, b, a;
+	};
+
 	struct CHAT {
 		DWORD pts;
 		DWORD count;
@@ -96,6 +110,7 @@ private:
 		BYTE shadowColorG;
 		BYTE shadowColorR;
 		tstring text;
+		std::vector<EmojiDrawCall> emojiCalls; // テクスチャ座標系での絵文字位置
 		bool IsMatch(const CHAT &c) const {
 			return c.colorB == colorB &&
 			       c.colorG == colorG &&
@@ -126,7 +141,8 @@ private:
 	bool WaitForIdleDrawingThread();
 	void UpdateChat();
 	static BOOL CALLBACK UpdateCallback(void *pBits, const RECT *pSurfaceRect, int pitch, void *pClientData);
-	void DrawChat(Gdiplus::Graphics &g, int width, int height, RECT *prcUnused, RECT *prcUnusedWoShita, bool *pbHasFirstDrawShita);
+	void DrawChat(Gdiplus::Graphics &g, int width, int height, RECT *prcUnused, RECT *prcUnusedWoShita, bool *pbHasFirstDrawShita, bool bCollectEmojiForD2D = false);
+	void FlushColorEmoji(int width, int height);
 	static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 	HINSTANCE hinst_;
@@ -181,4 +197,9 @@ private:
 	RECT rcDirty_;
 	bool bForceRefreshDirty_;
 	int debugFlags_;
+	// DirectWrite / Direct2D (カラー絵文字)
+	IDWriteFactory2 *pDWriteFactory_;
+	ID2D1Factory *pD2DFactory_;
+	ID2D1DCRenderTarget *pD2DTarget_;
+	std::vector<EmojiDrawCall> emojiDrawCalls_; // フレームごとにリセット
 };

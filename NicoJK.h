@@ -3,6 +3,12 @@
 #include <atomic>
 #include <thread>
 
+// DirectWrite/Direct2D 前方宣言 (カラー絵文字 for リストボックス)
+struct IDWriteFactory2;
+struct IDWriteTextFormat;
+struct ID2D1Factory;
+struct ID2D1DCRenderTarget;
+
 // プラグインクラス
 class CNicoJK : public TVTest::CTVTestPlugin
 {
@@ -177,6 +183,18 @@ private:
 	HWND hForcePostEditBox_;
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
+	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
+	IDWriteFactory2 *pDWriteFactory_;
+	ID2D1Factory *pD2DFactory_;
+	ID2D1DCRenderTarget *pD2DTarget_;
+	IDWriteTextFormat *pDWriteFormat_;
+	float cachedDWriteFontSizePx_;
+	TCHAR cachedDWriteFontName_[LF_FACESIZE];
+	HDC hdcMemCache_;
+	HBITMAP hbmMemCache_;
+	HBITMAP hbmMemCacheDefault_;
+	int cachedMemW_;
+	int cachedMemH_;
 	bool bDisplayLogList_;
 	std::vector<FORCE_ELEM> forceList_;
 	std::list<LOG_ELEM> logList_;

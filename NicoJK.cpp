@@ -18,8 +18,18 @@
 #include "NicoJK.h"
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <d2d1.h>
+#include <d2d1helper.h>
+#include <dwrite_2.h>
 
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
+
+// Windows 8.1 未満の SDK でも定義されるようにフォールバック
+#ifndef DWRITE_E_NOCOLOR
+#define DWRITE_E_NOCOLOR ((HRESULT)0x88985004L)
+#endif
 
 namespace
 {
@@ -103,6 +113,89 @@ enum {
 	COMMAND_HIDE_COMMENT,
 	COMMAND_FORWARD_A,
 };
+
+// カラー絵文字描画用 IDWriteTextRenderer 実装 (リストボックス用)
+class ColorEmojiTextRendererNJ : public IDWriteTextRenderer
+{
+public:
+	ColorEmojiTextRendererNJ(IDWriteFactory2 *pFactory, ID2D1RenderTarget *pRT, D2D1_COLOR_F color)
+		: pFactory_(pFactory), pRT_(pRT), color_(color), refCount_(1) {}
+
+	// IUnknown (スタック割り当てなので delete しない)
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount_; }
+	ULONG STDMETHODCALLTYPE Release() override { return --refCount_; }
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
+		if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWritePixelSnapping) || riid == __uuidof(IDWriteTextRenderer)) {
+			*ppv = this; AddRef(); return S_OK;
+		}
+		*ppv = nullptr; return E_NOINTERFACE;
+	}
+
+	// IDWritePixelSnapping
+	HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL *isDisabled) override {
+		*isDisabled = FALSE; return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX *transform) override {
+		pRT_->GetTransform(reinterpret_cast<D2D1_MATRIX_3X2_F*>(transform)); return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT *ppd) override {
+		float x, y; pRT_->GetDpi(&x, &y); *ppd = y / 96.0f; return S_OK;
+	}
+
+	// IDWriteTextRenderer
+	HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT originX, FLOAT originY,
+		DWRITE_MEASURING_MODE mode, DWRITE_GLYPH_RUN const *run,
+		DWRITE_GLYPH_RUN_DESCRIPTION const *desc, IUnknown*) override
+	{
+		IDWriteColorGlyphRunEnumerator *pEnum = nullptr;
+		HRESULT hr = pFactory_->TranslateColorGlyphRun(originX, originY, run, desc, mode, nullptr, 0, &pEnum);
+		if (hr == DWRITE_E_NOCOLOR || FAILED(hr)) {
+			ID2D1SolidColorBrush *pBrush = nullptr;
+			if (SUCCEEDED(pRT_->CreateSolidColorBrush(color_, &pBrush))) {
+				pRT_->DrawGlyphRun(D2D1::Point2F(originX, originY), run, pBrush, mode);
+				pBrush->Release();
+			}
+		} else {
+			BOOL hasRun = FALSE;
+			while (SUCCEEDED(pEnum->MoveNext(&hasRun)) && hasRun) {
+				const DWRITE_COLOR_GLYPH_RUN *pColorRun = nullptr;
+				pEnum->GetCurrentRun(&pColorRun);
+				D2D1_COLOR_F col = (pColorRun->paletteIndex == 0xFFFF) ? color_ :
+					D2D1::ColorF(pColorRun->runColor.r, pColorRun->runColor.g,
+					             pColorRun->runColor.b, pColorRun->runColor.a);
+				ID2D1SolidColorBrush *pBrush = nullptr;
+				if (SUCCEEDED(pRT_->CreateSolidColorBrush(col, &pBrush))) {
+					pRT_->DrawGlyphRun(
+						D2D1::Point2F(pColorRun->baselineOriginX, pColorRun->baselineOriginY),
+						&pColorRun->glyphRun, pBrush, mode);
+					pBrush->Release();
+				}
+			}
+			pEnum->Release();
+		}
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, DWRITE_UNDERLINE const*, IUnknown*) override { return S_OK; }
+	HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, DWRITE_STRIKETHROUGH const*, IUnknown*) override { return S_OK; }
+	HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
+
+private:
+	IDWriteFactory2 *pFactory_;
+	ID2D1RenderTarget *pRT_;
+	D2D1_COLOR_F color_;
+	ULONG refCount_;
+};
+
+// UTF-16 サロゲートペア (BMP外コードポイント) を含むか判定
+static bool ContainsEmoji(LPCTSTR text) {
+	for (; *text; ++text) {
+		unsigned c = static_cast<unsigned short>(*text);
+		if (c >= 0xD800 && c <= 0xDFFF) return true;
+	}
+	return false;
+}
+
 }
 
 void CNicoJK::RPL_ELEM::SetEnabled(bool b)
@@ -148,6 +241,16 @@ CNicoJK::CNicoJK()
 	, hForcePostEditBox_(nullptr)
 	, hbrForcePostEditBox_(nullptr)
 	, hForceFont_(nullptr)
+	, pDWriteFactory_(nullptr)
+	, pD2DFactory_(nullptr)
+	, pD2DTarget_(nullptr)
+	, pDWriteFormat_(nullptr)
+	, cachedDWriteFontSizePx_(0.0f)
+	, hdcMemCache_(nullptr)
+	, hbmMemCache_(nullptr)
+	, hbmMemCacheDefault_(nullptr)
+	, cachedMemW_(0)
+	, cachedMemH_(0)
 	, bDisplayLogList_(false)
 	, logListDisplayedSize_(0)
 	, bPendingTimerUpdateList_(false)
@@ -188,6 +291,7 @@ CNicoJK::CNicoJK()
 {
 	cookie_[0] = '\0';
 	lastPostComm_[0] = TEXT('\0');
+	cachedDWriteFontName_[0] = TEXT('\0');
 	logReader_.SetCheckIntervalMsec(READ_LOG_FOLDER_INTERVAL);
 	SETTINGS s = {};
 	s_ = s;
@@ -259,6 +363,22 @@ bool CNicoJK::Initialize()
 	bool bSetHookOsdCompositor = m_pApp->GetVersion() < TVTest::MakeVersion(0, 9, 0);
 	if (!commentWindow_.Initialize(g_hinstDLL, &bEnableOsdCompositor, bSetHookOsdCompositor)) {
 		return false;
+	}
+	// Direct2D / DirectWrite 初期化 (リストボックスのカラー絵文字対応)
+	{
+		D2D1_FACTORY_OPTIONS d2dOpts = {};
+		if (SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+		                                __uuidof(ID2D1Factory), &d2dOpts,
+		                                reinterpret_cast<void**>(&pD2DFactory_)))) {
+			// D2D_ALPHA_MODE_IGNORE: GDI 描画済み背景との合成でプレマル問題を回避
+			D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+				D2D1_RENDER_TARGET_TYPE_DEFAULT,
+				D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+				96.0f, 96.0f);
+			pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
+		}
+		DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
+		                    reinterpret_cast<IUnknown**>(&pDWriteFactory_));
 	}
 	if (bEnableOsdCompositor) {
 		m_pApp->AddLog(L"OsdCompositorを初期化しました。");
@@ -339,6 +459,16 @@ bool CNicoJK::Finalize()
 		bDragAcceptFiles_ = false;
 	}
 	commentWindow_.Finalize();
+	if (pDWriteFormat_) { pDWriteFormat_->Release(); pDWriteFormat_ = nullptr; }
+	if (hdcMemCache_) {
+		if (hbmMemCache_) { SelectBitmap(hdcMemCache_, hbmMemCacheDefault_); DeleteBitmap(hbmMemCache_); }
+		DeleteDC(hdcMemCache_);
+		hdcMemCache_ = nullptr; hbmMemCache_ = nullptr; hbmMemCacheDefault_ = nullptr;
+		cachedMemW_ = 0; cachedMemH_ = 0;
+	}
+	if (pD2DTarget_) { pD2DTarget_->Release(); pD2DTarget_ = nullptr; }
+	if (pD2DFactory_) { pD2DFactory_->Release(); pD2DFactory_ = nullptr; }
+	if (pDWriteFactory_) { pDWriteFactory_->Release(); pDWriteFactory_ = nullptr; }
 	return true;
 }
 
@@ -1852,7 +1982,7 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	        left + buttonWidth, hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_POPUP), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
 	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
-	    CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS,
+	    CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS | CBS_OWNERDRAWFIXED,
 	        padding, padding + height + 100, 100, 50, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr))
 	{
 		if (hForceFont_) {
@@ -2110,14 +2240,22 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			SaveToIni();
 			m_pApp->SetPluginCommandState(COMMAND_HIDE_FORCE, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
 			m_pApp->SetPluginCommandState(COMMAND_HIDE_COMMENT, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
+			// キャッシュ DWrite フォーマットとオフスクリーン DC を解放
+			if (pDWriteFormat_) { pDWriteFormat_->Release(); pDWriteFormat_ = nullptr; }
+			if (hdcMemCache_) {
+				if (hbmMemCache_) { SelectBitmap(hdcMemCache_, hbmMemCacheDefault_); DeleteBitmap(hbmMemCache_); }
+				DeleteDC(hdcMemCache_);
+				hdcMemCache_ = nullptr; hbmMemCache_ = nullptr; hbmMemCacheDefault_ = nullptr;
+				cachedMemW_ = 0; cachedMemH_ = 0;
+			}
 			hForce_ = nullptr;
 		}
 		break;
 	case WM_MEASUREITEM:
 		{
 			LPMEASUREITEMSTRUCT lpmis = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
-			if (lpmis->CtlID == IDC_FORCELIST && hForceFont_) {
-				HWND hItem = GetDlgItem(hwnd, IDC_FORCELIST);
+			if ((lpmis->CtlID == IDC_FORCELIST || lpmis->CtlID == IDC_CB_POST) && hForceFont_) {
+				HWND hItem = GetDlgItem(hwnd, lpmis->CtlID);
 				HDC hdc = GetDC(hItem);
 				HFONT hFontOld = SelectFont(hdc, hForceFont_);
 				TEXTMETRIC tm;
@@ -2158,113 +2296,303 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 	case WM_DRAWITEM:
 		{
 			LPDRAWITEMSTRUCT lpdis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
-			if (lpdis->CtlType == ODT_LISTBOX) {
+			if (lpdis->CtlType == ODT_LISTBOX || lpdis->CtlType == ODT_COMBOBOX) {
 				bool bSelected = (lpdis->itemState & ODS_SELECTED) != 0;
-				HBRUSH hbr = CreateSolidBrush(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : GetBkColor(lpdis->hDC));
-				FillRect(lpdis->hDC, &lpdis->rcItem, hbr);
-				DeleteBrush(hbr);
 
-				TCHAR text[1024];
-				if (ListBox_GetTextLen(lpdis->hwndItem, lpdis->itemID) < _countof(text)) {
-					int textLen = ListBox_GetText(lpdis->hwndItem, lpdis->itemID, text);
-					if (textLen >= 0) {
-						LPCTSTR pText = text;
-						bool bEmphasis = false;
-						if (pText[0] == TEXT('#')) {
-							// 文字列の強調色表示
-							bEmphasis = true;
-							++pText;
+				int itemW = lpdis->rcItem.right  - lpdis->rcItem.left;
+				int itemH = lpdis->rcItem.bottom - lpdis->rcItem.top;
+
+				// オフスクリーン DC をキャッシュして毎回の GDI オブジェクト生成コストを削減
+				if (!hdcMemCache_) {
+					hdcMemCache_ = CreateCompatibleDC(lpdis->hDC);
+					if (hdcMemCache_) {
+						hbmMemCache_ = CreateCompatibleBitmap(lpdis->hDC, itemW, itemH);
+						if (hbmMemCache_) {
+							hbmMemCacheDefault_ = SelectBitmap(hdcMemCache_, hbmMemCache_);
+							cachedMemW_ = itemW;
+							cachedMemH_ = itemH;
+						} else {
+							DeleteDC(hdcMemCache_);
+							hdcMemCache_ = nullptr;
 						}
-						COLORREF crBk = RGB(0xFF, 0xFF, 0xFF);
-						COLORREF crMiddle = RGB(0, 0, 0);
-						size_t leftLen = 0;
-						if (pText[0] == TEXT('[')) {
-							// 右側文字列の背景色指定
-							LPCTSTR pEnd = _tcschr(++pText, TEXT(']'));
-							if (pEnd) {
-								crBk = _tcstol(pText, nullptr, 10);
-								// 中間文字列色指定
-								LPCTSTR p = _tcschr(pText, TEXT(','));
-								if (p && p < pEnd) {
-									crMiddle = _tcstol(++p, nullptr, 10);
-									// 左側文字列の文字数指定
-									p = _tcschr(p, TEXT(','));
-									if (p && p < pEnd) {
-										leftLen = _tcstol(++p, nullptr, 10);
-									}
-								}
-								pText = pEnd + 1;
+					}
+				} else if (itemW > cachedMemW_ || itemH > cachedMemH_) {
+					// アイテムサイズが増えたときだけビットマップを拡大 (縮小はしない)
+					SelectBitmap(hdcMemCache_, hbmMemCacheDefault_);
+					DeleteBitmap(hbmMemCache_);
+					int newW = max(itemW, cachedMemW_);
+					int newH = max(itemH, cachedMemH_);
+					hbmMemCache_ = CreateCompatibleBitmap(lpdis->hDC, newW, newH);
+					if (hbmMemCache_) {
+						hbmMemCacheDefault_ = SelectBitmap(hdcMemCache_, hbmMemCache_);
+						cachedMemW_ = newW;
+						cachedMemH_ = newH;
+					} else {
+						DeleteDC(hdcMemCache_);
+						hdcMemCache_ = nullptr; hbmMemCacheDefault_ = nullptr;
+						cachedMemW_ = 0; cachedMemH_ = 0;
+					}
+				}
+				if (!hdcMemCache_) return TRUE;
+				HDC hdcMem = hdcMemCache_;
+
+				HFONT hFontOld = hForceFont_ ? SelectFont(hdcMem, hForceFont_) : nullptr;
+				RECT rcMem = {0, 0, itemW, itemH};
+				int dcDpi = GetDeviceCaps(lpdis->hDC, LOGPIXELSY);
+				if (dcDpi <= 0) dcDpi = 96;
+
+				// IDWriteTextFormat をキャッシュ (フォント名/サイズが変わったときだけ再生成)
+				float fontSizePx = (float)(s_.forceFontSize * dcDpi) / 72.0f;
+				if (pDWriteFactory_ && (!pDWriteFormat_ || cachedDWriteFontSizePx_ != fontSizePx ||
+				                        _tcscmp(s_.forceFontName, cachedDWriteFontName_) != 0)) {
+					if (pDWriteFormat_) { pDWriteFormat_->Release(); pDWriteFormat_ = nullptr; }
+					if (SUCCEEDED(pDWriteFactory_->CreateTextFormat(
+							s_.forceFontName, nullptr,
+							DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+							DWRITE_FONT_STRETCH_NORMAL, fontSizePx, L"ja", &pDWriteFormat_))) {
+						cachedDWriteFontSizePx_ = fontSizePx;
+						_tcsncpy_s(cachedDWriteFontName_, s_.forceFontName, _TRUNCATE);
+					}
+				}
+
+				if (lpdis->CtlType == ODT_LISTBOX) {
+					HBRUSH hbr = CreateSolidBrush(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : GetBkColor(lpdis->hDC));
+					FillRect(hdcMem, &rcMem, hbr);
+					DeleteBrush(hbr);
+
+					TCHAR text[1024];
+					if (ListBox_GetTextLen(lpdis->hwndItem, lpdis->itemID) < _countof(text)) {
+						int textLen = ListBox_GetText(lpdis->hwndItem, lpdis->itemID, text);
+						if (textLen >= 0) {
+							LPCTSTR pText = text;
+							bool bEmphasis = false;
+							if (pText[0] == TEXT('#')) {
+								bEmphasis = true;
+								++pText;
 							}
-						}
-						int oldBkMode = SetBkMode(lpdis->hDC, TRANSPARENT);
-						COLORREF crText = bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) :
-						                  bEmphasis ? RGB(0xFF, 0, 0) : GetTextColor(lpdis->hDC);
-						COLORREF crOld = SetTextColor(lpdis->hDC, crText);
-						RECT rc = lpdis->rcItem;
-						rc.left += 1;
-						if (pText[0] == TEXT('{')) {
-							// 左側+中間文字列の描画幅指定
-							size_t fixedLen = _tcscspn(&pText[1], TEXT("}"));
-							if (text + textLen >= pText + 2 + 2 * fixedLen) {
-								tstring calcText(&pText[1], &pText[1 + fixedLen]);
-								tstring drawText(&pText[2 + fixedLen], &pText[2 + 2 * fixedLen]);
-								pText += 2 + 2 * fixedLen;
-								int mask = s_.headerMask;
-								size_t maskedLeftLen = min(leftLen, fixedLen);
-								for (size_t i = 0, j = 0; i < calcText.size(); j++, mask >>= 1) {
-									if (mask & 1) {
-										calcText.erase(i, 1);
-										drawText.erase(i, 1);
-										if (j < leftLen) {
-											--maskedLeftLen;
+							COLORREF crBk = RGB(0xFF, 0xFF, 0xFF);
+							COLORREF crMiddle = RGB(0, 0, 0);
+							size_t leftLen = 0;
+							if (pText[0] == TEXT('[')) {
+								LPCTSTR pEnd = _tcschr(++pText, TEXT(']'));
+								if (pEnd) {
+									crBk = _tcstol(pText, nullptr, 10);
+									LPCTSTR p = _tcschr(pText, TEXT(','));
+									if (p && p < pEnd) {
+										crMiddle = _tcstol(++p, nullptr, 10);
+										p = _tcschr(p, TEXT(','));
+										if (p && p < pEnd) {
+											leftLen = _tcstol(++p, nullptr, 10);
 										}
-									} else {
-										++i;
+									}
+									pText = pEnd + 1;
+								}
+							}
+							COLORREF crText = bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) :
+							                  bEmphasis ? RGB(0xFF, 0, 0) : GetTextColor(lpdis->hDC);
+							// rc は memDC 座標系 (0 起点)
+							RECT rc = {1, 0, itemW, itemH};
+
+							bool bHasFixed = (pText[0] == TEXT('{'));
+							tstring calcText, drawText, calcMiddleText, drawMiddleText;
+							if (bHasFixed) {
+								size_t fixedLen = _tcscspn(&pText[1], TEXT("}"));
+								if (text + textLen >= pText + 2 + 2 * fixedLen) {
+									calcText.assign(&pText[1], fixedLen);
+									drawText.assign(&pText[2 + fixedLen], fixedLen);
+									pText += 2 + 2 * fixedLen;
+									int mask = s_.headerMask;
+									size_t maskedLeftLen = min(leftLen, fixedLen);
+									for (size_t i = 0, j = 0; i < calcText.size(); j++, mask >>= 1) {
+										if (mask & 1) {
+											calcText.erase(i, 1);
+											drawText.erase(i, 1);
+											if (j < leftLen) {
+												--maskedLeftLen;
+											}
+										} else {
+											++i;
+										}
+									}
+									calcMiddleText = calcText.substr(maskedLeftLen);
+									drawMiddleText = drawText.substr(maskedLeftLen);
+									calcText.resize(maskedLeftLen);
+									drawText.resize(maskedLeftLen);
+								} else {
+									bHasFixed = false;
+								}
+							}
+
+							// 絵文字 (サロゲートペア) を含む場合のみ D2D を使用、それ以外は高速 GDI パス
+							bool bNeedD2D = pD2DTarget_ && pDWriteFormat_ &&
+							                (ContainsEmoji(pText) ||
+							                 (bHasFixed && (ContainsEmoji(drawText.c_str()) ||
+							                                ContainsEmoji(drawMiddleText.c_str()))));
+
+							if (bNeedD2D && SUCCEEDED(pD2DTarget_->BindDC(hdcMem, &rcMem))) {
+								// measureDW: キャッシュ済みフォーマットを再利用してレイアウトのみ生成
+								auto measureDW = [&](const tstring &txt) -> int {
+									IDWriteTextLayout *pLayout = nullptr;
+									if (FAILED(pDWriteFactory_->CreateTextLayout(
+											txt.c_str(), (UINT32)txt.size(), pDWriteFormat_, 10000.f, 10000.f, &pLayout))) return 0;
+									DWRITE_TEXT_METRICS met = {};
+									pLayout->GetMetrics(&met);
+									pLayout->Release();
+									return (int)ceilf(met.width);
+								};
+
+								pD2DTarget_->BeginDraw();
+								pD2DTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+								auto drawSegDW = [&](const tstring &txt, COLORREF cr) {
+									IDWriteTextLayout *pLayout = nullptr;
+									if (FAILED(pDWriteFactory_->CreateTextLayout(
+											txt.c_str(), (UINT32)txt.size(), pDWriteFormat_,
+											(float)(itemW - rc.left), (float)itemH, &pLayout))) return;
+									D2D1_COLOR_F col = D2D1::ColorF(GetRValue(cr)/255.f, GetGValue(cr)/255.f, GetBValue(cr)/255.f);
+									ColorEmojiTextRendererNJ renderer(pDWriteFactory_, pD2DTarget_, col);
+									pLayout->Draw(nullptr, &renderer, (float)rc.left, (float)rc.top);
+									pLayout->Release();
+								};
+
+								if (bHasFixed && !calcText.empty()) {
+									if (lastCalcLeftText_ != calcText) {
+										lastCalcLeftText_ = calcText;
+										lastCalcLeftWidth_ = measureDW(calcText);
+									}
+									drawSegDW(drawText, crText);
+									rc.left += lastCalcLeftWidth_;
+								}
+								if (bHasFixed && !calcMiddleText.empty()) {
+									if (lastCalcMiddleText_ != calcMiddleText) {
+										lastCalcMiddleText_ = calcMiddleText;
+										lastCalcMiddleWidth_ = measureDW(calcMiddleText);
+									}
+									drawSegDW(drawMiddleText, crMiddle != RGB(0, 0, 0) ? crMiddle : crText);
+									rc.left += lastCalcMiddleWidth_;
+								}
+								if (!bSelected && crBk != RGB(0xFF, 0xFF, 0xFF)) {
+									int measuredW = measureDW(tstring(pText));
+									ID2D1SolidColorBrush *pBkBrush = nullptr;
+									if (SUCCEEDED(pD2DTarget_->CreateSolidColorBrush(
+											D2D1::ColorF(GetRValue(crBk)/255.f, GetGValue(crBk)/255.f, GetBValue(crBk)/255.f),
+											&pBkBrush))) {
+										pD2DTarget_->FillRectangle(
+											D2D1::RectF((float)rc.left, 0.f, (float)(rc.left + measuredW), (float)itemH), pBkBrush);
+										pBkBrush->Release();
+									}
+									crText = GetBrightness(crBk) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
+								}
+								drawSegDW(tstring(pText), crText);
+
+								if (FAILED(pD2DTarget_->EndDraw())) {
+									pD2DTarget_->Release(); pD2DTarget_ = nullptr;
+									if (pD2DFactory_) {
+										D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+											D2D1_RENDER_TARGET_TYPE_DEFAULT,
+											D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+											96.0f, 96.0f);
+										pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
 									}
 								}
-								tstring calcMiddleText = calcText.substr(maskedLeftLen);
-								tstring drawMiddleText = drawText.substr(maskedLeftLen);
-								calcText.resize(maskedLeftLen);
-								drawText.resize(maskedLeftLen);
-								if (!calcText.empty()) {
-									// 左側文字列を描画
+							} else {
+								// GDI 高速パス (絵文字なし): memDC 座標系で描画
+								int oldBkMode = SetBkMode(hdcMem, TRANSPARENT);
+								COLORREF crOld = SetTextColor(hdcMem, crText);
+
+								if (bHasFixed && !calcText.empty()) {
 									if (lastCalcLeftText_ != calcText) {
 										RECT rcCalc = rc;
-										DrawText(lpdis->hDC, calcText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
+										DrawText(hdcMem, calcText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
 										lastCalcLeftText_ = calcText;
 										lastCalcLeftWidth_ = rcCalc.right - rcCalc.left;
 									}
-									DrawText(lpdis->hDC, drawText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+									DrawText(hdcMem, drawText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
 									rc.left += lastCalcLeftWidth_;
 								}
-								if (!calcMiddleText.empty()) {
-									// 中間文字列を描画
+								if (bHasFixed && !calcMiddleText.empty()) {
 									if (lastCalcMiddleText_ != calcMiddleText) {
 										RECT rcCalc = rc;
-										DrawText(lpdis->hDC, calcMiddleText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
+										DrawText(hdcMem, calcMiddleText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
 										lastCalcMiddleText_ = calcMiddleText;
 										lastCalcMiddleWidth_ = rcCalc.right - rcCalc.left;
 									}
 									if (crMiddle != RGB(0, 0, 0)) {
-										SetTextColor(lpdis->hDC, crMiddle);
+										SetTextColor(hdcMem, crMiddle);
 									}
-									DrawText(lpdis->hDC, drawMiddleText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-									SetTextColor(lpdis->hDC, crText);
+									DrawText(hdcMem, drawMiddleText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+									SetTextColor(hdcMem, crText);
 									rc.left += lastCalcMiddleWidth_;
 								}
+								COLORREF crBkOld = SetBkColor(hdcMem, crBk);
+								if (!bSelected && crBk != RGB(0xFF, 0xFF, 0xFF)) {
+									SetBkMode(hdcMem, OPAQUE);
+									SetTextColor(hdcMem, GetBrightness(crBk) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0));
+								}
+								DrawText(hdcMem, pText, -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+								SetBkColor(hdcMem, crBkOld);
+								SetTextColor(hdcMem, crOld);
+								SetBkMode(hdcMem, oldBkMode);
 							}
 						}
-						COLORREF crBkOld = SetBkColor(lpdis->hDC, crBk);
-						if (!bSelected && crBk != RGB(0xFF, 0xFF, 0xFF)) {
-							SetBkMode(lpdis->hDC, OPAQUE);
-							SetTextColor(lpdis->hDC, GetBrightness(crBk) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0));
+					}
+				} else { // ODT_COMBOBOX
+					HBRUSH hbr = CreateSolidBrush(bSelected ? GetSysColor(COLOR_HIGHLIGHT)
+					                                        : GetSysColor(COLOR_WINDOW));
+					FillRect(hdcMem, &rcMem, hbr);
+					DeleteBrush(hbr);
+
+					TCHAR text[512];
+					if ((int)lpdis->itemID >= 0 &&
+					    SendDlgItemMessage(hwnd, IDC_CB_POST, CB_GETLBTEXT,
+					                      lpdis->itemID, reinterpret_cast<LPARAM>(text)) >= 0)
+					{
+						COLORREF crText = bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT)
+						                            : GetSysColor(COLOR_WINDOWTEXT);
+						// rc は memDC 座標系 (0 起点)
+						RECT rc = {2, 0, itemW, itemH};
+
+						if (pD2DTarget_ && pDWriteFormat_ && ContainsEmoji(text) &&
+						    SUCCEEDED(pD2DTarget_->BindDC(hdcMem, &rcMem))) {
+							pD2DTarget_->BeginDraw();
+							pD2DTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+							IDWriteTextLayout *pLayout = nullptr;
+							if (SUCCEEDED(pDWriteFactory_->CreateTextLayout(
+									text, (UINT32)_tcslen(text), pDWriteFormat_,
+									(float)(itemW - rc.left), (float)itemH, &pLayout))) {
+								D2D1_COLOR_F col = D2D1::ColorF(GetRValue(crText)/255.f,
+								                                 GetGValue(crText)/255.f,
+								                                 GetBValue(crText)/255.f);
+								ColorEmojiTextRendererNJ renderer(pDWriteFactory_, pD2DTarget_, col);
+								pLayout->Draw(nullptr, &renderer, (float)rc.left, (float)rc.top);
+								pLayout->Release();
+							}
+							if (FAILED(pD2DTarget_->EndDraw())) {
+								pD2DTarget_->Release(); pD2DTarget_ = nullptr;
+								if (pD2DFactory_) {
+									D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+										D2D1_RENDER_TARGET_TYPE_DEFAULT,
+										D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+										96.0f, 96.0f);
+									pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
+								}
+							}
+						} else {
+							int oldBkMode = SetBkMode(hdcMem, TRANSPARENT);
+							COLORREF crOld = SetTextColor(hdcMem, crText);
+							DrawText(hdcMem, text, -1, &rc,
+							         DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_VCENTER);
+							SetTextColor(hdcMem, crOld);
+							SetBkMode(hdcMem, oldBkMode);
 						}
-						DrawText(lpdis->hDC, pText, -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-						SetBkColor(lpdis->hDC, crBkOld);
-						SetTextColor(lpdis->hDC, crOld);
-						SetBkMode(lpdis->hDC, oldBkMode);
 					}
 				}
+
+				BitBlt(lpdis->hDC, lpdis->rcItem.left, lpdis->rcItem.top,
+				       itemW, itemH, hdcMem, 0, 0, SRCCOPY);
+
+				if (hFontOld) SelectFont(hdcMem, hFontOld);
+				// hdcMem はキャッシュなので DeleteDC しない
 				return TRUE;
 			}
 		}
