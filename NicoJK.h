@@ -143,6 +143,7 @@ private:
 		int no;
 		COLORREF cr;
 		TCHAR marker[28];
+		bool bAbone;
 		tstring text;
 	};
 	struct RPL_ELEM {
@@ -184,6 +185,9 @@ private:
 	void OutputMessageLog(LPCTSTR text);
 	void GetPostComboBoxText(LPTSTR comm, size_t commSize, LPTSTR mail = nullptr, size_t mailSize = 0);
 	void ProcessLocalPost(LPCTSTR comm);
+	bool BuildUserNGPattern(LPCTSTR marker, RPL_ELEM *pElem, tstring *pOldPattern);
+	int GetLogListNGState(int index);
+	void ToggleLogListNG(int index);
 	void RestorePopupWindowOpacity(HWND hwnd);
 	void RestorePopupWindowState(HWND hwnd);
 	void UpdateWindowTheme(HWND hwnd = nullptr);

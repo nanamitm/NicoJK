@@ -97,8 +97,11 @@ const UINT WM_RESET_STREAM = WM_APP + 105;
 const UINT WM_UPDATE_LIST = WM_APP + 106;
 const UINT WM_SET_ZORDER = WM_APP + 107;
 const UINT WM_POST_COMMENT = WM_APP + 108;
+const UINT WM_TOGGLE_LOG_LIST_NG = WM_APP + 109;
+const UINT WM_GET_LOG_LIST_NG_STATE = WM_APP + 110;
 
 const UINT ID_FORCE_LIST_COPY = 1;
+const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
 
 enum {
 	TIMER_UPDATE = 1,
@@ -1520,6 +1523,7 @@ bool CNicoJK::ProcessChatTag(const char *tag, bool bShow, int showDelay, bool *p
 		                   (bShow ? LOG_ELEM_TYPE_DEFAULT : LOG_ELEM_TYPE_HIDE);
 		e.no = 0;
 		e.cr = RGB(0xFF, 0xFF, 0xFF);
+		e.bAbone = bAbone;
 		e.marker[0] = TEXT('\0');
 		if (!bShow) {
 			_tcscpy_s(e.marker, TEXT("."));
@@ -1536,15 +1540,7 @@ bool CNicoJK::ProcessChatTag(const char *tag, bool bShow, int showDelay, bool *p
 				e.cr = GetColor(logcmd);
 			}
 		}
-		if (bAbone) {
-			e.text = s_.abone;
-			// 末尾の'&'は元コメントに置き換える (TODO: 末尾以外にも対応したほうがいいかも)
-			if (!e.text.empty() && e.text.back() == TEXT('&')) {
-				e.text.replace(e.text.size() - 1, 1, text);
-			}
-		} else {
-			e.text = text;
-		}
+		e.text = text;
 		logList_.push_back(std::move(e));
 		return true;
 	}
@@ -1560,6 +1556,7 @@ void CNicoJK::OutputMessageLog(LPCTSTR text)
 	e.type = LOG_ELEM_TYPE_MESSAGE;
 	e.no = 0;
 	e.cr = RGB(0xFF, 0xFF, 0xFF);
+	e.bAbone = false;
 	_tcscpy_s(e.marker, TEXT("#"));
 	e.text = text;
 	logList_.push_back(std::move(e));
@@ -1734,6 +1731,117 @@ void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 	}
 }
 
+bool CNicoJK::BuildUserNGPattern(LPCTSTR marker, RPL_ELEM *pElem, tstring *pOldPattern)
+{
+	if (!marker || !marker[0]) {
+		return false;
+	}
+	RPL_ELEM e;
+	e.section = TEXT("AutoReplace");
+	TCHAR pattern[128];
+	// 20文字で切っているのは単に表現を短くするため。深い理由はない
+	_stprintf_s(pattern, TEXT("s/^<chat(?=[^>]*? user_id=\"%.20s%s)/<chat abone=\"1\"/g"),
+	            marker, _tcslen(marker) > 20 ? TEXT("") : TEXT("\""));
+	if (!e.SetPattern(pattern)) {
+		return false;
+	}
+	if (pElem) {
+		*pElem = e;
+	}
+	if (pOldPattern) {
+		_stprintf_s(pattern, TEXT("s/^<chat(?=.*? user_id=\"%.14s%s.*>.*<)/<chat abone=\"1\"/g"),
+		            marker, _tcslen(marker) > 14 ? TEXT("") : TEXT("\""));
+		*pOldPattern = pattern;
+	}
+	return true;
+}
+
+int CNicoJK::GetLogListNGState(int index)
+{
+	if (!bDisplayLogList_ || index < 0 || index >= static_cast<int>(logList_.size())) {
+		return -1;
+	}
+	std::list<LOG_ELEM>::const_iterator it = logList_.begin();
+	std::advance(it, index);
+	if (it->type != LOG_ELEM_TYPE_DEFAULT && it->type != LOG_ELEM_TYPE_REFUGE) {
+		return -1;
+	}
+
+	RPL_ELEM e;
+	tstring oldPattern;
+	if (!BuildUserNGPattern(it->marker, &e, &oldPattern)) {
+		return -1;
+	}
+	return std::find_if(rplList_.cbegin(), rplList_.cend(), [&](const RPL_ELEM &a) {
+		return a.section == TEXT("AutoReplace") && (a.pattern == e.pattern || a.pattern == oldPattern);
+	}) != rplList_.cend() || it->bAbone ? 1 : 0;
+}
+
+void CNicoJK::ToggleLogListNG(int index)
+{
+	if (!bDisplayLogList_ || index < 0 || index >= static_cast<int>(logList_.size())) {
+		return;
+	}
+	std::list<LOG_ELEM>::const_iterator it = logList_.begin();
+	std::advance(it, index);
+	if (it->type != LOG_ELEM_TYPE_DEFAULT && it->type != LOG_ELEM_TYPE_REFUGE) {
+		return;
+	}
+
+	const tstring marker = it->marker;
+	const int ngState = GetLogListNGState(index);
+	if (ngState < 0) {
+		return;
+	}
+	const bool bEnableNG = ngState == 0;
+
+	RPL_ELEM e;
+	tstring oldPattern;
+	if (!BuildUserNGPattern(marker.c_str(), &e, &oldPattern)) {
+		return;
+	}
+
+	// 既存パターンかどうか調べる
+	std::vector<RPL_ELEM> autoRplList;
+	LoadRplListFromIni(TEXT("AutoReplace"), &autoRplList);
+	auto jt = std::find_if(autoRplList.begin(), autoRplList.end(), [&](const RPL_ELEM &a) { return a.pattern == e.pattern || a.pattern == oldPattern; });
+	const bool bHasPattern = jt != autoRplList.end();
+
+	if (bEnableNG && !bHasPattern) {
+		autoRplList.push_back(e);
+		while (static_cast<int>(autoRplList.size()) > max(s_.maxAutoReplace, 0)) {
+			autoRplList.erase(autoRplList.begin());
+		}
+	}
+	else if (!bEnableNG && bHasPattern) {
+		autoRplList.erase(jt);
+	}
+
+	bool bChanged = false;
+	for (int i = 0; i < static_cast<int>(autoRplList.size()); autoRplList[i].key = i, ++i);
+	if (bEnableNG || bHasPattern) {
+		SaveRplListToIni(TEXT("AutoReplace"), autoRplList);
+		bChanged = true;
+	}
+
+	// 置換リストを更新
+	rplList_ = autoRplList;
+	LoadRplListFromIni(TEXT("CustomReplace"), &rplList_);
+
+	for (auto kt = logList_.begin(); kt != logList_.end(); ++kt) {
+		if (!_tcscmp(kt->marker, marker.c_str()) &&
+		    (kt->type == LOG_ELEM_TYPE_DEFAULT || kt->type == LOG_ELEM_TYPE_REFUGE)) {
+			if (kt->bAbone != bEnableNG) {
+				kt->bAbone = bEnableNG;
+				bChanged = true;
+			}
+		}
+	}
+	if (bChanged && hForce_) {
+		SendMessage(hForce_, WM_UPDATE_LIST, TRUE, 0);
+	}
+}
+
 static tstring FormatListBoxTextForCopy(LPCTSTR text)
 {
 	if (!text) {
@@ -1867,6 +1975,13 @@ static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 				return 0;
 			}
 			AppendMenu(hMenu, MF_STRING, ID_FORCE_LIST_COPY, TEXT("コピー(&C)"));
+			if (GetProp(hwnd, TEXT("IsLogList"))) {
+				LRESULT ngState = SendMessage(GetParent(hwnd), WM_GET_LOG_LIST_NG_STATE, static_cast<WPARAM>(index), 0);
+				if (ngState >= 0) {
+					AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+					AppendMenu(hMenu, MF_STRING, ID_FORCE_LIST_TOGGLE_NG, ngState ? TEXT("NG解除(&N)") : TEXT("NG登録(&N)"));
+				}
+			}
 			SetForegroundWindow(hwnd);
 			UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
 			DestroyMenu(hMenu);
@@ -1878,6 +1993,9 @@ static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 						CopyTextToClipboard(hwnd, FormatListBoxTextForCopy(text.data()));
 					}
 				}
+			}
+			else if (cmd == ID_FORCE_LIST_TOGGLE_NG) {
+				SendMessage(GetParent(hwnd), WM_TOGGLE_LOG_LIST_NG, static_cast<WPARAM>(index), 0);
 			}
 			return 0;
 		}
@@ -2349,6 +2467,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			// 勢いリストのサブクラス化
 			HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
 			SetProp(hList, TEXT("DefProc"), reinterpret_cast<HANDLE>(GetWindowLongPtr(hList, GWLP_WNDPROC)));
+			RemoveProp(hList, TEXT("IsLogList"));
 			SetWindowLongPtr(hList, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ForceListBoxProc));
 			// 投稿欄のサブクラス化
 			hForcePostEditBox_ = nullptr;
@@ -2437,6 +2556,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 			// 勢いリストのサブクラス化を解除
 			HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
+			RemoveProp(hList, TEXT("IsLogList"));
 			SetWindowLongPtr(hList, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GetProp(hList, TEXT("DefProc"))));
 			RemoveProp(hList, TEXT("DefProc"));
 
@@ -2937,50 +3057,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 			} else if (HIWORD(wParam) == LBN_DBLCLK) {
 				int index = ListBox_GetCurSel((HWND)lParam);
-				if (bDisplayLogList_ && 0 <= index && index < (int)logList_.size()) {
-					std::list<LOG_ELEM>::const_iterator it = logList_.begin();
-					std::advance(it, index);
-					if (it->type == LOG_ELEM_TYPE_DEFAULT || it->type == LOG_ELEM_TYPE_REFUGE) {
-						// ユーザーNGの置換パターンをつくる
-						RPL_ELEM e;
-						e.section = TEXT("AutoReplace");
-						// 20文字で切っているのは単に表現を短くするため。深い理由はない
-						TCHAR pattern[128];
-						_stprintf_s(pattern, TEXT("s/^<chat(?=[^>]*? user_id=\"%.20s%s)/<chat abone=\"1\"/g"),
-						            it->marker, _tcslen(it->marker) > 20 ? TEXT("") : TEXT("\""));
-						if (e.SetPattern(pattern)) {
-							// 旧仕様のパターン
-							_stprintf_s(pattern, TEXT("s/^<chat(?=.*? user_id=\"%.14s%s.*>.*<)/<chat abone=\"1\"/g"),
-							            it->marker, _tcslen(it->marker) > 14 ? TEXT("") : TEXT("\""));
-							// 既存パターンかどうか調べる
-							std::vector<RPL_ELEM> autoRplList;
-							LoadRplListFromIni(TEXT("AutoReplace"), &autoRplList);
-							auto jt = std::find_if(autoRplList.cbegin(), autoRplList.cend(), [&](const RPL_ELEM &a) { return a.pattern == e.pattern || a.pattern == pattern; });
-							// メッセージボックスで確認
-							TCHAR header[_countof(it->marker) + 32];
-							_stprintf_s(header, TEXT(">>%d %s ID: %s\n"), it->no, it->type == LOG_ELEM_TYPE_REFUGE ? TEXT("refuge") : TEXT("nico"), it->marker);
-							if (jt != autoRplList.end()) {
-								if (MessageBox(hwnd, (header + it->text).c_str(), TEXT("NicoJK - NG【解除】します"), MB_OKCANCEL) == IDOK) {
-									autoRplList.erase(jt);
-									for (int i = 0; i < (int)autoRplList.size(); autoRplList[i].key = i, ++i);
-									SaveRplListToIni(TEXT("AutoReplace"), autoRplList);
-								}
-							} else {
-								if (MessageBox(hwnd, (header + it->text).c_str(), TEXT("NicoJK - NG登録します"), MB_OKCANCEL) == IDOK) {
-									autoRplList.push_back(e);
-									while ((int)autoRplList.size() > max(s_.maxAutoReplace, 0)) {
-										autoRplList.erase(autoRplList.begin());
-									}
-									for (int i = 0; i < (int)autoRplList.size(); autoRplList[i].key = i, ++i);
-									SaveRplListToIni(TEXT("AutoReplace"), autoRplList);
-								}
-							}
-							// 置換リストを更新
-							rplList_ = autoRplList;
-							LoadRplListFromIni(TEXT("CustomReplace"), &rplList_);
-						}
-					}
-				}
+				ToggleLogListNG(index);
 			}
 			break;
 		case IDC_CB_POST:
@@ -3346,6 +3423,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 			// 描画を一時停止
 			SendMessage(hList, WM_SETREDRAW, FALSE, 0);
+			if (bDisplayLogList_) {
+				SetProp(hList, TEXT("IsLogList"), reinterpret_cast<HANDLE>(1));
+			}
+			else {
+				RemoveProp(hList, TEXT("IsLogList"));
+			}
 			int iTopItemIndex = ListBox_GetTopIndex(hList);
 			// wParam!=FALSEのときはリストの内容をリセットする
 			if (wParam) {
@@ -3371,11 +3454,13 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					// IDにつく接頭辞は識別上の価値がないのでとばす
 					int markerPrefixLen = !_tcsncmp(it->marker, TEXT("a:"), 2) ? 2 : 0;
 					TCHAR text[256];
-					int len = _stprintf_s(text, TEXT("%s[%u,%u,9]{00:00:00 (MMM)}%02d:%02d:%02d (%.3s)%s"),
-					                      it->type == LOG_ELEM_TYPE_MESSAGE ? TEXT("#") : TEXT(""), static_cast<DWORD>(it->cr), static_cast<DWORD>(crMarker),
-					                      it->st.wHour, it->st.wMinute, it->st.wSecond,
-					                      it->marker + markerPrefixLen, &TEXT("   ")[min<size_t>(_tcslen(it->marker + markerPrefixLen), 3)]);
-					_tcsncpy_s(text + len, _countof(text) - len, it->text.c_str(), _TRUNCATE);
+					_stprintf_s(text, TEXT("%s[%u,%u,9]{00:00:00 (MMM)}%02d:%02d:%02d (%.3s)%s"),
+					            it->type == LOG_ELEM_TYPE_MESSAGE ? TEXT("#") : TEXT(""), static_cast<DWORD>(it->cr), static_cast<DWORD>(crMarker),
+					            it->st.wHour, it->st.wMinute, it->st.wSecond,
+					            it->marker + markerPrefixLen, &TEXT("   ")[min<size_t>(_tcslen(it->marker + markerPrefixLen), 3)]);
+					if (!it->bAbone) {
+						_tcsncpy_s(text + _tcslen(text), _countof(text) - _tcslen(text), it->text.c_str(), _TRUNCATE);
+					}
 					ListBox_AddString(hList, text);
 					++logListDisplayedSize_;
 				}
@@ -3673,6 +3758,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 		}
 		return TRUE;
+	case WM_TOGGLE_LOG_LIST_NG:
+		ToggleLogListNG(static_cast<int>(wParam));
+		return TRUE;
+	case WM_GET_LOG_LIST_NG_STATE:
+		return GetLogListNGState(static_cast<int>(wParam));
 	case WM_SHOWWINDOW:
 		m_pApp->SetPluginCommandState(COMMAND_HIDE_FORCE, wParam != 0 ? TVTest::COMMAND_ICON_STATE_CHECKED : 0);
 		// FALL THROUGH!
