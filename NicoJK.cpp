@@ -98,6 +98,8 @@ const UINT WM_UPDATE_LIST = WM_APP + 106;
 const UINT WM_SET_ZORDER = WM_APP + 107;
 const UINT WM_POST_COMMENT = WM_APP + 108;
 
+const UINT ID_FORCE_LIST_COPY = 1;
+
 enum {
 	TIMER_UPDATE = 1,
 	TIMER_JK_WATCHDOG,
@@ -1732,6 +1734,74 @@ void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 	}
 }
 
+static tstring FormatListBoxTextForCopy(LPCTSTR text)
+{
+	if (!text) {
+		return tstring();
+	}
+	if (text[0] == TEXT('#')) {
+		++text;
+	}
+	if (text[0] == TEXT('[')) {
+		LPCTSTR pEnd = _tcschr(text + 1, TEXT(']'));
+		if (pEnd) {
+			text = pEnd + 1;
+		}
+	}
+
+	tstring out;
+	while (*text) {
+		if (*text == TEXT('{')) {
+			LPCTSTR pEnd = _tcschr(text + 1, TEXT('}'));
+			if (pEnd) {
+				size_t fixedLen = pEnd - (text + 1);
+				LPCTSTR pDraw = pEnd + 1;
+				if (_tcslen(pDraw) >= fixedLen) {
+					out.append(pDraw, fixedLen);
+					text = pDraw + fixedLen;
+					continue;
+				}
+			}
+		}
+		out.push_back(*text++);
+	}
+	return out;
+}
+
+static bool CopyTextToClipboard(HWND hwnd, const tstring &text)
+{
+	if (!OpenClipboard(hwnd)) {
+		return false;
+	}
+	EmptyClipboard();
+	const size_t bytes = (text.size() + 1) * sizeof(TCHAR);
+	HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+	if (!hMem) {
+		CloseClipboard();
+		return false;
+	}
+	void *p = GlobalLock(hMem);
+	if (!p) {
+		GlobalFree(hMem);
+		CloseClipboard();
+		return false;
+	}
+	memcpy(p, text.c_str(), bytes);
+	GlobalUnlock(hMem);
+#ifdef UNICODE
+	UINT format = CF_UNICODETEXT;
+#else
+	UINT format = CF_TEXT;
+#endif
+	if (!SetClipboardData(format, hMem)) {
+		GlobalFree(hMem);
+		CloseClipboard();
+		return false;
+	}
+	CloseClipboard();
+	return true;
+}
+
 // サブクラス化した勢いリストのプロシージャ
 static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -1761,6 +1831,56 @@ static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 			}
 		}
 		break;
+	case WM_CONTEXTMENU:
+		{
+			int index = LB_ERR;
+			POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+			if (pt.x == -1 && pt.y == -1) {
+				index = ListBox_GetCurSel(hwnd);
+				RECT rcItem;
+				if (index != LB_ERR && ListBox_GetItemRect(hwnd, index, &rcItem) != LB_ERR) {
+					pt.x = rcItem.left + 2;
+					pt.y = rcItem.top + (rcItem.bottom - rcItem.top) / 2;
+					ClientToScreen(hwnd, &pt);
+				}
+				else {
+					GetWindowRect(hwnd, &rcItem);
+					pt.x = rcItem.left;
+					pt.y = rcItem.top;
+				}
+			}
+			else {
+				POINT ptClient = pt;
+				ScreenToClient(hwnd, &ptClient);
+				DWORD item = static_cast<DWORD>(SendMessage(hwnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(ptClient.x, ptClient.y)));
+				if (HIWORD(item) == 0) {
+					index = LOWORD(item);
+					ListBox_SetCurSel(hwnd, index);
+				}
+			}
+			if (index == LB_ERR) {
+				return 0;
+			}
+
+			HMENU hMenu = CreatePopupMenu();
+			if (!hMenu) {
+				return 0;
+			}
+			AppendMenu(hMenu, MF_STRING, ID_FORCE_LIST_COPY, TEXT("コピー(&C)"));
+			SetForegroundWindow(hwnd);
+			UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+			DestroyMenu(hMenu);
+			if (cmd == ID_FORCE_LIST_COPY) {
+				int len = ListBox_GetTextLen(hwnd, index);
+				if (len >= 0) {
+					std::vector<TCHAR> text(len + 1);
+					if (ListBox_GetText(hwnd, index, text.data()) != LB_ERR) {
+						CopyTextToClipboard(hwnd, FormatListBoxTextForCopy(text.data()));
+					}
+				}
+			}
+			return 0;
+		}
 	case WM_GETDLGCODE:
 		// 本体のアクセラレータを抑制するため
 		return DLGC_WANTARROWS;
