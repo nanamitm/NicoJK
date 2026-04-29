@@ -257,6 +257,8 @@ CNicoJK::CNicoJK()
 	, lastUpdateListTick_(0)
 	, lastCalcLeftWidth_(0)
 	, lastCalcMiddleWidth_(0)
+	, lastCalcLeftWidthD2D_(0)
+	, lastCalcMiddleWidthD2D_(0)
 	, forwardTick_(0)
 	, bQuitSyncThread_(false)
 	, bPendingTimerForward_(false)
@@ -2060,6 +2062,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			bPendingTimerUpdateList_ = false;
 			lastCalcLeftText_.clear();
 			lastCalcMiddleText_.clear();
+			lastCalcLeftTextD2D_.clear();
+			lastCalcMiddleTextD2D_.clear();
 			commentWindow_.SetStyle(s_.commentFontName, s_.commentFontNameMulti, s_.commentFontNameEmoji, s_.bCommentFontBold, s_.bCommentFontAntiAlias,
 			                        s_.commentFontOutline, s_.bUseOsdCompositor, s_.bUseTexture, s_.bUseDrawingThread);
 			commentWindow_.SetCommentSize(s_.commentSize, s_.commentSizeMin, s_.commentSizeMax, s_.commentLineMargin);
@@ -2456,20 +2460,20 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 								};
 
 								if (bHasFixed && !calcText.empty()) {
-									if (lastCalcLeftText_ != calcText) {
-										lastCalcLeftText_ = calcText;
-										lastCalcLeftWidth_ = measureDW(calcText);
+									if (lastCalcLeftTextD2D_ != calcText) {
+										lastCalcLeftTextD2D_ = calcText;
+										lastCalcLeftWidthD2D_ = measureDW(calcText);
 									}
 									drawSegDW(drawText, crText);
-									rc.left += lastCalcLeftWidth_;
+									rc.left += lastCalcLeftWidthD2D_;
 								}
 								if (bHasFixed && !calcMiddleText.empty()) {
-									if (lastCalcMiddleText_ != calcMiddleText) {
-										lastCalcMiddleText_ = calcMiddleText;
-										lastCalcMiddleWidth_ = measureDW(calcMiddleText);
+									if (lastCalcMiddleTextD2D_ != calcMiddleText) {
+										lastCalcMiddleTextD2D_ = calcMiddleText;
+										lastCalcMiddleWidthD2D_ = measureDW(calcMiddleText);
 									}
 									drawSegDW(drawMiddleText, crMiddle != RGB(0, 0, 0) ? crMiddle : crText);
-									rc.left += lastCalcMiddleWidth_;
+									rc.left += lastCalcMiddleWidthD2D_;
 								}
 								if (!bSelected && crBk != RGB(0xFF, 0xFF, 0xFF)) {
 									int measuredW = measureDW(tstring(pText));

@@ -205,6 +205,10 @@ private:
 	tstring lastCalcMiddleText_;
 	int lastCalcLeftWidth_;
 	int lastCalcMiddleWidth_;
+	tstring lastCalcLeftTextD2D_;
+	tstring lastCalcMiddleTextD2D_;
+	int lastCalcLeftWidthD2D_;
+	int lastCalcMiddleWidthD2D_;
 
 	// コメント描画ウィンドウ
 	CCommentWindow commentWindow_;
