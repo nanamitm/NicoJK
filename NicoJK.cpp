@@ -2777,21 +2777,39 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					}
 					if (s_.bSetChannel && !bUsingLogfileDriver_ && !bRecording_ && jkID > 0) {
 						// 本体のチャンネル切り替えをする
-						int currentTuning = m_pApp->GetTuningSpace();
-						for (int stage = 0; stage < 2; ++stage) {
-							DWORD ntsID;
-							for (int i = 0; GetChannelNetworkServiceID(currentTuning, i, &ntsID); ++i) {
-								std::vector<NETWORK_SERVICE_ID_ELEM>::const_iterator it = LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
-								int chJK = it != ntsIDList_.end() && it->ntsID == ntsID ? it->jkID : -1;
-								// 実況IDが一致するチャンネルに切替
-								// 実況IDからチャンネルへの対応は一般に一意ではないので優先度を設ける
-								if ((stage > 0 || (chJK & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) && jkID == (chJK & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
-									// すでに表示中なら切り替えない
-									if (ntsID != GetCurrentNetworkServiceID()) {
-										m_pApp->SetChannel(currentTuning, i, ntsID >> 16);
+						int spaceNum = 0;
+						m_pApp->GetTuningSpace(&spaceNum);
+						const DWORD currentNtsID = GetCurrentNetworkServiceID();
+						bool bSelected = false;
+						for (int currentTuning = 0; currentTuning < spaceNum && !bSelected; ++currentTuning) {
+							for (int stage = 0; stage < 2 && !bSelected; ++stage) {
+								DWORD ntsID;
+								for (int i = 0; GetChannelNetworkServiceID(currentTuning, i, &ntsID); ++i) {
+									std::vector<NETWORK_SERVICE_ID_ELEM>::const_iterator it = LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
+									int chJK = it != ntsIDList_.end() && it->ntsID == ntsID ? it->jkID : -1;
+									// 実況IDが一致するチャンネルに切替
+									// 実況IDからチャンネルへの対応は一般に一意ではないので優先度を設ける
+									if ((stage > 0 || (chJK & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) && jkID == (chJK & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
+										// すでに表示中なら切り替えない
+										if (ntsID != currentNtsID) {
+											TVTest::ChannelSelectInfo cinfo = {};
+											cinfo.Size = sizeof(cinfo);
+											cinfo.Flags = TVTest::CHANNEL_SELECT_FLAG_STRICTSERVICE;
+											cinfo.Space = -1;
+											cinfo.Channel = -1;
+											if ((ntsID & 0xFFFF) == 0x000F) {
+												// 地上波は正規化したネットワークIDなのでチューニング空間を指定する
+												cinfo.Space = currentTuning;
+											}
+											else {
+												cinfo.NetworkID = static_cast<WORD>(ntsID & 0xFFFF);
+											}
+											cinfo.ServiceID = static_cast<WORD>(ntsID >> 16);
+											m_pApp->SelectChannel(&cinfo);
+										}
+										bSelected = true;
+										break;
 									}
-									stage = 2;
-									break;
 								}
 							}
 						}
