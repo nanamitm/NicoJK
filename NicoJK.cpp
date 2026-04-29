@@ -2452,7 +2452,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 									IDWriteTextLayout *pLayout = nullptr;
 									if (FAILED(pDWriteFactory_->CreateTextLayout(
 											txt.c_str(), (UINT32)txt.size(), pDWriteFormat_,
-											(float)(itemW - rc.left), (float)itemH, &pLayout))) return;
+											(float)max(itemW - rc.left, 1), (float)max(itemH, 1), &pLayout))) return;
 									D2D1_COLOR_F col = D2D1::ColorF(GetRValue(cr)/255.f, GetGValue(cr)/255.f, GetBValue(cr)/255.f);
 									ColorEmojiTextRendererNJ renderer(pDWriteFactory_, pD2DTarget_, col);
 									pLayout->Draw(nullptr, &renderer, (float)rc.left, (float)rc.top);
