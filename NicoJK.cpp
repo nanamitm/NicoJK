@@ -18,11 +18,13 @@
 #include "NicoJK.h"
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <uxtheme.h>
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite_2.h>
 
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 
@@ -196,6 +198,61 @@ static bool ContainsEmoji(LPCTSTR text) {
 	return false;
 }
 
+}
+
+CNicoJKPanelColor::CNicoJKPanelColor()
+	: crPanelText_(0)
+	, crPanelBack_(0)
+	, crPanelCurTabText_(0)
+	, crPanelCurTabBack_(0)
+	, hbrPanelBack_(nullptr)
+	, hbrPanelCurTabBack_(nullptr)
+	, bDelaySetColor_(false)
+{
+}
+
+CNicoJKPanelColor::~CNicoJKPanelColor()
+{
+	if (hbrPanelBack_) {
+		DeleteBrush(hbrPanelBack_);
+	}
+	if (hbrPanelCurTabBack_) {
+		DeleteBrush(hbrPanelCurTabBack_);
+	}
+}
+
+bool CNicoJKPanelColor::SetColor(TVTest::CTVTestApp *pApp)
+{
+	if (!pApp) {
+		return false;
+	}
+	crPanelText_ = pApp->GetColor(L"PanelText");
+	crPanelBack_ = pApp->GetColor(L"PanelBack");
+	crPanelCurTabText_ = pApp->GetColor(L"PanelCurTabText");
+	crPanelCurTabBack_ = pApp->GetColor(L"PanelCurTabBack");
+	if (hbrPanelBack_) {
+		DeleteBrush(hbrPanelBack_);
+	}
+	hbrPanelBack_ = CreateSolidBrush(crPanelBack_);
+	if (hbrPanelCurTabBack_) {
+		DeleteBrush(hbrPanelCurTabBack_);
+	}
+	hbrPanelCurTabBack_ = CreateSolidBrush(crPanelCurTabBack_);
+	bDelaySetColor_ = false;
+	return hbrPanelBack_ && hbrPanelCurTabBack_;
+}
+
+bool CNicoJKPanelColor::DelaySetColor(TVTest::CTVTestApp *pApp)
+{
+	if (!bDelaySetColor_) {
+		return false;
+	}
+	return SetColor(pApp);
+}
+
+bool CNicoJKPanelColor::IsDark() const
+{
+	return 3 * GetRValue(crPanelBack_) + 6 * GetGValue(crPanelBack_) + GetBValue(crPanelBack_) < 1280;
 }
 
 void CNicoJK::RPL_ELEM::SetEnabled(bool b)
@@ -1195,8 +1252,7 @@ LRESULT CALLBACK CNicoJK::EventCallback(UINT Event, LPARAM lParam1, LPARAM lPara
 	case TVTest::EVENT_COLORCHANGE:
 		// 色の設定が変化した
 		if (pThis->hPanel_ && pThis->hForce_) {
-			DeleteBrush(SetClassLongPtr(pThis->hForce_, GCLP_HBRBACKGROUND,
-				reinterpret_cast<LONG_PTR>(CreateSolidBrush(pThis->m_pApp->GetColor(L"PanelBack")))));
+			pThis->panelColor_.SetDelaySetColorFlag();
 			InvalidateRect(pThis->hForce_, nullptr, TRUE);
 		}
 		break;
@@ -1680,6 +1736,15 @@ void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	switch (uMsg) {
+	case WM_PAINT:
+		if (ListBox_GetCount(hwnd) == 0) {
+			PAINTSTRUCT ps;
+			HDC hdc = BeginPaint(hwnd, &ps);
+			FillRect(hdc, &ps.rcPaint, reinterpret_cast<HBRUSH>(GetClassLongPtr(GetParent(hwnd), GCLP_HBRBACKGROUND)));
+			EndPaint(hwnd, &ps);
+			return 0;
+		}
+		break;
 	case WM_ERASEBKGND:
 		{
 			int n = ListBox_GetCount(hwnd);
@@ -1690,7 +1755,7 @@ static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 				GetClientRect(hwnd, &rc);
 				if (rc.bottom > rcLast.bottom) {
 					rc.top = rcLast.bottom;
-					FillRect(reinterpret_cast<HDC>(wParam), &rc, reinterpret_cast<HBRUSH>(GetClassLongPtr(hwnd, GCLP_HBRBACKGROUND)));
+					FillRect(reinterpret_cast<HDC>(wParam), &rc, reinterpret_cast<HBRUSH>(GetClassLongPtr(GetParent(hwnd), GCLP_HBRBACKGROUND)));
 				}
 				return TRUE;
 			}
@@ -2052,6 +2117,48 @@ void CNicoJK::SetOpacity(HWND hwnd, int opacityOrToggle)
 	InvalidateRect(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_TOGGLE), nullptr, FALSE);
 }
 
+void CNicoJK::UpdateWindowTheme(HWND hwnd)
+{
+	HWND hwndForce = hwnd ? hwnd : hForce_;
+	if (!hwndForce) {
+		return;
+	}
+	if (!panelColor_.GetPanelBackBrush()) {
+		panelColor_.SetColor(m_pApp);
+	}
+	bool bDark = panelColor_.IsDark();
+	HWND hList = GetDlgItem(hwndForce, IDC_FORCELIST);
+	HWND hCombo = GetDlgItem(hwndForce, IDC_CB_POST);
+	if (hList) {
+		SetWindowTheme(hList, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+	}
+	if (hCombo) {
+		COMBOBOXINFO cbi = {};
+		cbi.cbSize = sizeof(cbi);
+		DWORD selStart = 0;
+		DWORD selEnd = 0;
+		bool bDropDown = (GetWindowLong(hCombo, GWL_STYLE) & 3) == CBS_DROPDOWN;
+		if (bDropDown) {
+			SendMessage(hCombo, CB_GETEDITSEL, reinterpret_cast<WPARAM>(&selStart), reinterpret_cast<LPARAM>(&selEnd));
+		}
+		SetWindowTheme(hCombo, bDark ? L"DarkMode_CFD" : nullptr, nullptr);
+		if (GetComboBoxInfo(hCombo, &cbi)) {
+			if (cbi.hwndItem) {
+				SetWindowTheme(cbi.hwndItem, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+			}
+			if (cbi.hwndList) {
+				SetWindowTheme(cbi.hwndList, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+			}
+		}
+		if (bDropDown) {
+			SendMessage(hCombo, CB_SETEDITSEL, selStart, selEnd);
+		}
+	}
+	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
+		reinterpret_cast<LONG_PTR>(CreateSolidBrush(panelColor_.GetPanelBack()))));
+	InvalidateRect(hwndForce, nullptr, TRUE);
+}
+
 LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	switch (uMsg) {
@@ -2102,8 +2209,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			PostMessage(hwnd, WM_TIMER, TIMER_JK_WATCHDOG, 0);
 			if (hPanel_) {
 				// パネルウィンドウに連動
-				DeleteBrush(SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND,
-					reinterpret_cast<LONG_PTR>(CreateSolidBrush(m_pApp->GetColor(L"PanelBack")))));
+				panelColor_.SetColor(m_pApp);
+				UpdateWindowTheme(hwnd);
 				RECT rc;
 				GetClientRect(hPanel_, &rc);
 				MoveWindow(hwnd, 0, 0, rc.right, rc.bottom, TRUE);
@@ -2255,6 +2362,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			hForce_ = nullptr;
 		}
 		break;
+	case WM_ERASEBKGND:
+		if (hPanel_ && panelColor_.DelaySetColor(m_pApp)) {
+			UpdateWindowTheme();
+		}
+		break;
 	case WM_MEASUREITEM:
 		{
 			LPMEASUREITEMSTRUCT lpmis = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
@@ -2302,6 +2414,15 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			LPDRAWITEMSTRUCT lpdis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
 			if (lpdis->CtlType == ODT_LISTBOX || lpdis->CtlType == ODT_COMBOBOX) {
 				bool bSelected = (lpdis->itemState & ODS_SELECTED) != 0;
+				bool bPanelDraw = hPanel_ && panelColor_.GetPanelBackBrush() && panelColor_.GetPanelCurTabBackBrush();
+				COLORREF crItemBack = bPanelDraw ?
+					(bSelected ? panelColor_.GetPanelCurTabBack() : panelColor_.GetPanelBack()) :
+					(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : lpdis->CtlType == ODT_COMBOBOX ? GetSysColor(COLOR_WINDOW) : GetBkColor(lpdis->hDC));
+				COLORREF crItemText = bPanelDraw ?
+					(bSelected ? panelColor_.GetPanelCurTabText() : panelColor_.GetPanelText()) :
+					(bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : lpdis->CtlType == ODT_COMBOBOX ? GetSysColor(COLOR_WINDOWTEXT) : GetTextColor(lpdis->hDC));
+				HBRUSH hbrItemBack = bPanelDraw ?
+					(bSelected ? panelColor_.GetPanelCurTabBackBrush() : panelColor_.GetPanelBackBrush()) : nullptr;
 
 				int itemW = lpdis->rcItem.right  - lpdis->rcItem.left;
 				int itemH = lpdis->rcItem.bottom - lpdis->rcItem.top;
@@ -2360,9 +2481,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 
 				if (lpdis->CtlType == ODT_LISTBOX) {
-					HBRUSH hbr = CreateSolidBrush(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : GetBkColor(lpdis->hDC));
+					HBRUSH hbr = hbrItemBack ? hbrItemBack : CreateSolidBrush(crItemBack);
 					FillRect(hdcMem, &rcMem, hbr);
-					DeleteBrush(hbr);
+					if (!hbrItemBack) {
+						DeleteBrush(hbr);
+					}
 
 					TCHAR text[1024];
 					if (ListBox_GetTextLen(lpdis->hwndItem, lpdis->itemID) < _countof(text)) {
@@ -2392,8 +2515,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 									pText = pEnd + 1;
 								}
 							}
-							COLORREF crText = bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) :
-							                  bEmphasis ? RGB(0xFF, 0, 0) : GetTextColor(lpdis->hDC);
+							COLORREF crText = bEmphasis && !bSelected ? RGB(0xFF, 0, 0) : crItemText;
 							// rc は memDC 座標系 (0 起点)
 							RECT rc = {1, 0, itemW, itemH};
 
@@ -2450,9 +2572,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 
 								auto drawSegDW = [&](const tstring &txt, COLORREF cr) {
 									IDWriteTextLayout *pLayout = nullptr;
+									int layoutW = max<int>(itemW - rc.left, 1);
+									int layoutH = max(itemH, 1);
 									if (FAILED(pDWriteFactory_->CreateTextLayout(
 											txt.c_str(), (UINT32)txt.size(), pDWriteFormat_,
-											(float)max(itemW - rc.left, 1), (float)max(itemH, 1), &pLayout))) return;
+											(float)layoutW, (float)layoutH, &pLayout))) return;
 									D2D1_COLOR_F col = D2D1::ColorF(GetRValue(cr)/255.f, GetGValue(cr)/255.f, GetBValue(cr)/255.f);
 									ColorEmojiTextRendererNJ renderer(pDWriteFactory_, pD2DTarget_, col);
 									pLayout->Draw(nullptr, &renderer, (float)rc.left, (float)rc.top);
@@ -2541,18 +2665,18 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 						}
 					}
 				} else { // ODT_COMBOBOX
-					HBRUSH hbr = CreateSolidBrush(bSelected ? GetSysColor(COLOR_HIGHLIGHT)
-					                                        : GetSysColor(COLOR_WINDOW));
+					HBRUSH hbr = hbrItemBack ? hbrItemBack : CreateSolidBrush(crItemBack);
 					FillRect(hdcMem, &rcMem, hbr);
-					DeleteBrush(hbr);
+					if (!hbrItemBack) {
+						DeleteBrush(hbr);
+					}
 
 					TCHAR text[512];
 					if ((int)lpdis->itemID >= 0 &&
 					    SendDlgItemMessage(hwnd, IDC_CB_POST, CB_GETLBTEXT,
 					                      lpdis->itemID, reinterpret_cast<LPARAM>(text)) >= 0)
 					{
-						COLORREF crText = bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT)
-						                            : GetSysColor(COLOR_WINDOWTEXT);
+						COLORREF crText = crItemText;
 						// rc は memDC 座標系 (0 起点)
 						RECT rc = {2, 0, itemW, itemH};
 
@@ -2561,9 +2685,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							pD2DTarget_->BeginDraw();
 							pD2DTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 							IDWriteTextLayout *pLayout = nullptr;
+							int layoutW = max<int>(itemW - rc.left, 1);
+							int layoutH = max(itemH, 1);
 							if (SUCCEEDED(pDWriteFactory_->CreateTextLayout(
 									text, (UINT32)_tcslen(text), pDWriteFormat_,
-									(float)max(itemW - rc.left, 1), (float)max(itemH, 1), &pLayout))) {
+									(float)layoutW, (float)layoutH, &pLayout))) {
 								D2D1_COLOR_F col = D2D1::ColorF(GetRValue(crText)/255.f,
 								                                 GetGValue(crText)/255.f,
 								                                 GetBValue(crText)/255.f);

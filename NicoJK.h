@@ -3,6 +3,32 @@
 #include <atomic>
 #include <thread>
 
+// パネルカラーリソース管理クラス
+class CNicoJKPanelColor
+{
+public:
+	CNicoJKPanelColor();
+	~CNicoJKPanelColor();
+	bool SetColor(TVTest::CTVTestApp *pApp);
+	void SetDelaySetColorFlag() { bDelaySetColor_ = true; }
+	bool DelaySetColor(TVTest::CTVTestApp *pApp);
+	COLORREF GetPanelText() const { return crPanelText_; }
+	COLORREF GetPanelBack() const { return crPanelBack_; }
+	COLORREF GetPanelCurTabText() const { return crPanelCurTabText_; }
+	COLORREF GetPanelCurTabBack() const { return crPanelCurTabBack_; }
+	HBRUSH GetPanelBackBrush() const { return hbrPanelBack_; }
+	HBRUSH GetPanelCurTabBackBrush() const { return hbrPanelCurTabBack_; }
+	bool IsDark() const;
+private:
+	COLORREF crPanelText_;
+	COLORREF crPanelBack_;
+	COLORREF crPanelCurTabText_;
+	COLORREF crPanelCurTabBack_;
+	HBRUSH hbrPanelBack_;
+	HBRUSH hbrPanelCurTabBack_;
+	bool bDelaySetColor_;
+};
+
 // DirectWrite/Direct2D 前方宣言 (カラー絵文字 for リストボックス)
 struct IDWriteFactory2;
 struct IDWriteTextFormat;
@@ -160,6 +186,7 @@ private:
 	void ProcessLocalPost(LPCTSTR comm);
 	void RestorePopupWindowOpacity(HWND hwnd);
 	void RestorePopupWindowState(HWND hwnd);
+	void UpdateWindowTheme(HWND hwnd = nullptr);
 	static LRESULT CALLBACK PanelWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK PanelPopupWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK ForceWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -209,6 +236,7 @@ private:
 	tstring lastCalcMiddleTextD2D_;
 	int lastCalcLeftWidthD2D_;
 	int lastCalcMiddleWidthD2D_;
+	CNicoJKPanelColor panelColor_;
 
 	// コメント描画ウィンドウ
 	CCommentWindow commentWindow_;
