@@ -2563,12 +2563,15 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							IDWriteTextLayout *pLayout = nullptr;
 							if (SUCCEEDED(pDWriteFactory_->CreateTextLayout(
 									text, (UINT32)_tcslen(text), pDWriteFormat_,
-									(float)(itemW - rc.left), (float)itemH, &pLayout))) {
+									(float)max(itemW - rc.left, 1), (float)max(itemH, 1), &pLayout))) {
 								D2D1_COLOR_F col = D2D1::ColorF(GetRValue(crText)/255.f,
 								                                 GetGValue(crText)/255.f,
 								                                 GetBValue(crText)/255.f);
 								ColorEmojiTextRendererNJ renderer(pDWriteFactory_, pD2DTarget_, col);
-								pLayout->Draw(nullptr, &renderer, (float)rc.left, (float)rc.top);
+								DWRITE_TEXT_METRICS met = {};
+								pLayout->GetMetrics(&met);
+								float y = (float)rc.top + max(((float)itemH - met.height) / 2.0f, 0.0f);
+								pLayout->Draw(nullptr, &renderer, (float)rc.left, y);
 								pLayout->Release();
 							}
 							if (FAILED(pD2DTarget_->EndDraw())) {
