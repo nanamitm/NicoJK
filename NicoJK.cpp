@@ -194,13 +194,34 @@ private:
 	ULONG refCount_;
 };
 
-// UTF-16 サロゲートペア (BMP外コードポイント) を含むか判定
+// 絵文字を含むかを判定
 static bool ContainsEmoji(LPCTSTR text) {
-	for (; *text; ++text) {
-		unsigned c = static_cast<unsigned short>(*text);
-		if (c >= 0xD800 && c <= 0xDFFF) return true;
-	}
-	return false;
+    for (; *text; ++text) {
+        unsigned int cp = static_cast<unsigned short>(*text);
+
+        // 1. サロゲートペア (U+10000以上)
+        // 顔文字、食べ物、乗り物、国旗、新しい記号など。
+        // D2Dでカラー描画が必要なものの 90% 以上がここに含まれます。
+        if (cp >= 0xD800 && cp <= 0xDBFF) return true;
+
+        // 2. BMP内の絵文字として扱われやすい記号
+        // ⌚(231A), ⏩(23E9), ☔(2614), ⚡(26A1), ⚠️(26A0) など。
+        if ((cp >= 0x231A && cp <= 0x231B) ||
+            (cp >= 0x23E9 && cp <= 0x23EC) ||
+            (cp >= 0x23F0 && cp <= 0x23F3) ||
+            (cp >= 0x25AA && cp <= 0x25AB) ||
+            (cp >= 0x25B6 && cp <= 0x25C0) ||
+            (cp >= 0x25FB && cp <= 0x25FE) ||
+            (cp >= 0x2600 && cp <= 0x27BF) ||
+            (cp >= 0x2934 && cp <= 0x2935) ||
+            (cp >= 0x2B05 && cp <= 0x2B55)) return true;
+
+        // 3. バリエーションセレクター (U+FE0E, U+FE0F)
+        // 前の文字をテキストにするかカラーにするかの指示。
+        // これが含まれる場合も、カラー描画オプションを有効にするのが無難です。
+        if (cp >= 0xFE00 && cp <= 0xFE0F) return true;
+    }
+    return false;
 }
 
 }
@@ -301,6 +322,7 @@ CNicoJK::CNicoJK()
 	, hPanelPopup_(nullptr)
 	, hForce_(nullptr)
 	, hForcePostEditBox_(nullptr)
+	, hForceTooltip_(nullptr)
 	, hbrForcePostEditBox_(nullptr)
 	, hForceFont_(nullptr)
 	, pDWriteFactory_(nullptr)
@@ -993,8 +1015,10 @@ HWND CNicoJK::GetFullscreenWindow()
 	TVTest::HostInfo hostInfo;
 	if (m_pApp->GetFullscreen() && m_pApp->GetHostInfo(&hostInfo)) {
 		TCHAR className[64];
-		_tcsncpy_s(className, hostInfo.pszAppName, 47);
-		_tcscat_s(className, TEXT(" Fullscreen"));
+
+		if (_sntprintf_s(className, _TRUNCATE, TEXT("%.47s Fullscreen"), hostInfo.pszAppName) < 0) {
+			return nullptr;
+		}
 
 		HWND hwnd = nullptr;
 		while ((hwnd = FindWindowEx(nullptr, hwnd, className, nullptr)) != nullptr) {
@@ -1593,9 +1617,9 @@ void CNicoJK::GetPostComboBoxText(LPTSTR comm, size_t commSize, LPTSTR mail, siz
 void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 {
 	// パラメータ分割
-	TCHAR cmd[16];
+	TCHAR cmd[16] = {};
 	size_t cmdLen = _tcscspn(comm, TEXT(" "));
-	_tcsncpy_s(cmd, comm, min(cmdLen, _countof(cmd) - 1));
+	_tcsncpy_s(cmd, _countof(cmd), comm, min(cmdLen, _countof(cmd) - 1));
 	LPCTSTR arg = &comm[cmdLen] + _tcsspn(&comm[cmdLen], TEXT(" "));
 	LPTSTR endp;
 	LONGLONG llArg = _tcstoi64(arg, &endp, 10);
@@ -2302,6 +2326,28 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 			SendDlgItemMessage(hwnd, IDC_FORCELIST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_CB_POST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 		}
+		hForceTooltip_ = CreateWindowEx(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_ALWAYSTIP,
+		                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+		                                hwnd, nullptr, g_hinstDLL, nullptr);
+		auto addToolTip = [&](int id, LPCTSTR text) {
+			HWND hItem = GetDlgItem(hwnd, id);
+			if (!hForceTooltip_ || !hItem) {
+				return;
+			}
+			TOOLINFO ti = {};
+			ti.cbSize = sizeof(ti);
+			ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+			ti.hwnd = hwnd;
+			ti.uId = reinterpret_cast<UINT_PTR>(hItem);
+			ti.lpszText = const_cast<LPTSTR>(text);
+			SendMessage(hForceTooltip_, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&ti));
+		};
+		addToolTip(IDC_RADIO_FORCE, TEXT("勢いリストを表示"));
+		addToolTip(IDC_RADIO_LOG, TEXT("コメントログを表示"));
+		addToolTip(IDC_CHECK_SPECFILE, TEXT("実況ログファイルを読み込む"));
+		addToolTip(IDC_CHECK_RELATIVE, TEXT("読み込むログを現在の再生位置に合わせる"));
+		addToolTip(IDC_BUTTON_OPACITY_TOGGLE, TEXT("透明度を切り替える"));
+		addToolTip(IDC_BUTTON_POPUP, TEXT("ポップアップ表示を切り替える"));
 		return true;
 	}
 	return false;
@@ -2391,6 +2437,10 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		if (bDropDown) {
 			SendMessage(hCombo, CB_SETEDITSEL, selStart, selEnd);
 		}
+	}
+	if(hForceTooltip_)
+	{
+		SetWindowTheme(hForceTooltip_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
 	}
 	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
 		reinterpret_cast<LONG_PTR>(CreateSolidBrush(panelColor_.GetPanelBack()))));
@@ -2545,6 +2595,10 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_UP));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_TOGGLE));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_POPUP));
+			}
+			if (hForceTooltip_) {
+				DestroyWindow(hForceTooltip_);
+				hForceTooltip_ = nullptr;
 			}
 			// 投稿欄のサブクラス化を解除
 			COMBOBOXINFO cbi = {};

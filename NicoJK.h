@@ -212,6 +212,7 @@ private:
 	HWND hPanelPopup_;
 	HWND hForce_;
 	HWND hForcePostEditBox_;
+	HWND hForceTooltip_;
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
