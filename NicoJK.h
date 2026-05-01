@@ -129,6 +129,12 @@ private:
 		tstring name;
 		std::string chatStreamID;
 		std::string refugeChatStreamID;
+		bool bHasEpgInfo = false;
+		WORD networkID = 0;
+		WORD transportStreamID = 0;
+		WORD serviceID = 0;
+		tstring eventName;
+		ULONGLONG eventNameUpdateTick = 0;
 	};
 	enum LOG_ELEM_TYPE {
 		LOG_ELEM_TYPE_DEFAULT,
@@ -169,6 +175,8 @@ private:
 	void LoadFromIni();
 	void SaveToIni();
 	void LoadForceListFromIni(const tstring &logfileFolder);
+	void UpdateForceListEpgInfo();
+	void UpdateForceElemEventName(FORCE_ELEM *pElem, ULONGLONG nowTick);
 	void LoadRplListFromIni(LPCTSTR section, std::vector<RPL_ELEM> *pRplList);
 	void SaveRplListToIni(LPCTSTR section, const std::vector<RPL_ELEM> &rplList, bool bClearSection = true);
 	HWND GetFullscreenWindow();
@@ -191,9 +199,15 @@ private:
 	void RestorePopupWindowOpacity(HWND hwnd);
 	void RestorePopupWindowState(HWND hwnd);
 	void UpdateWindowTheme(HWND hwnd = nullptr);
+	void ShowLocalCommandHelp();
+	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
+	bool SendJkcnslLoginOtp(LPCTSTR otp);
+	bool CancelJkcnslLogin();
+	void ProcessJkcnslLoginRecv();
 	static LRESULT CALLBACK PanelWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK PanelPopupWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK ForceWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+	static LRESULT CALLBACK HelpWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	bool CreateForceWindowItems(HWND hwnd);
 	void SetOpacity(HWND hwnd, int opacityOrToggle);
 	LRESULT ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -213,6 +227,8 @@ private:
 	HWND hForce_;
 	HWND hForcePostEditBox_;
 	HWND hForceTooltip_;
+	HWND hHelpWindow_;
+	HWND hHelpEdit_;
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
@@ -257,9 +273,14 @@ private:
 	// 通信用
 	CJKStream channelStream_;
 	CJKStream jkStream_;
+	CJKStream loginStream_;
 	CJKTransfer jkTransfer_;
 	std::vector<char> channelBuf_;
 	std::vector<char> jkBuf_;
+	std::vector<char> loginBuf_;
+	std::string loginMail_;
+	std::string loginPassword_;
+	int loginState_;
 	int currentJKToGet_;
 	int currentJK_;
 	int currentJKChatCount_;

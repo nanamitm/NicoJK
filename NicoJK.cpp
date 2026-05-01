@@ -92,6 +92,7 @@ HWND FindNicoJKWindow(DWORD processID)
 const UINT WMS_FORCE = WM_APP + 101;
 const UINT WMS_JK = WM_APP + 102;
 const UINT WMS_TRANSFER = WM_APP + 103;
+const UINT WMS_LOGIN = WM_APP + 104;
 
 const UINT WM_RESET_STREAM = WM_APP + 105;
 const UINT WM_UPDATE_LIST = WM_APP + 106;
@@ -119,6 +120,14 @@ enum {
 	COMMAND_HIDE_FORCE,
 	COMMAND_HIDE_COMMENT,
 	COMMAND_FORWARD_A,
+};
+
+enum {
+	LOGIN_STATE_IDLE,
+	LOGIN_STATE_SET_MAIL,
+	LOGIN_STATE_SET_PASSWORD,
+	LOGIN_STATE_LOGIN,
+	LOGIN_STATE_WAIT_2FA,
 };
 
 // カラー絵文字描画用 IDWriteTextRenderer 実装 (リストボックス用)
@@ -323,6 +332,8 @@ CNicoJK::CNicoJK()
 	, hForce_(nullptr)
 	, hForcePostEditBox_(nullptr)
 	, hForceTooltip_(nullptr)
+	, hHelpWindow_(nullptr)
+	, hHelpEdit_(nullptr)
 	, hbrForcePostEditBox_(nullptr)
 	, hForceFont_(nullptr)
 	, pDWriteFactory_(nullptr)
@@ -350,6 +361,7 @@ CNicoJK::CNicoJK()
 	, bFlipFlop_(false)
 	, forwardOffset_(0)
 	, forwardOffsetDelta_(0)
+	, loginState_(LOGIN_STATE_IDLE)
 	, currentJKToGet_(-1)
 	, currentJK_(-1)
 	, currentJKChatCount_(0)
@@ -424,6 +436,17 @@ bool CNicoJK::Initialize()
 	wc.hbrBackground = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
 	wc.lpszClassName = TEXT("ru.jk.force");
 	if (RegisterClassEx(&wc) == 0) {
+		return false;
+	}
+	WNDCLASSEX wcHelp = {};
+	wcHelp.cbSize = sizeof(wcHelp);
+	wcHelp.style = CS_HREDRAW | CS_VREDRAW;
+	wcHelp.lpfnWndProc = HelpWindowProc;
+	wcHelp.hInstance = g_hinstDLL;
+	wcHelp.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	wcHelp.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+	wcHelp.lpszClassName = TEXT("ru.jk.help");
+	if (RegisterClassEx(&wcHelp) == 0) {
 		return false;
 	}
 	// 初期化処理
@@ -965,6 +988,109 @@ void CNicoJK::LoadForceListFromIni(const tstring &logfileFolder)
 			it->bFixedName = true;
 		}
 	}
+
+	UpdateForceListEpgInfo();
+}
+
+void CNicoJK::UpdateForceListEpgInfo()
+{
+#if TVTEST_PLUGIN_VERSION >= TVTEST_PLUGIN_VERSION_(0, 0, 12)
+	int numSpaces = 0;
+	m_pApp->GetTuningSpace(&numSpaces);
+	for (int space = 0; space < numSpaces; ++space) {
+		for (int ch = 0; ; ++ch) {
+			TVTest::ChannelInfo ci = {};
+			ci.Size = sizeof(ci);
+			if (!m_pApp->GetChannelInfo(space, ch, &ci)) {
+				break;
+			}
+			if (!ci.NetworkID || !ci.TransportStreamID || !ci.ServiceID) {
+				continue;
+			}
+
+			DWORD ntsID = 0;
+			if (0x7880 <= ci.NetworkID && ci.NetworkID <= 0x7FEF) {
+				// 地上波のサービス種別とサービス番号はマスクする
+				ntsID = (static_cast<DWORD>(ci.ServiceID&~0x0187) << 16) | 0x000F;
+			} else {
+				ntsID = (static_cast<DWORD>(ci.ServiceID) << 16) | ci.NetworkID;
+			}
+			std::vector<NETWORK_SERVICE_ID_ELEM>::const_iterator itNts =
+				LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
+			if (itNts == ntsIDList_.end() || itNts->ntsID != ntsID || itNts->jkID <= 0) {
+				continue;
+			}
+
+			int jkID = itNts->jkID & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR;
+			std::vector<FORCE_ELEM>::iterator itForce = LowerBoundJKID(forceList_.begin(), forceList_.end(), jkID);
+			if (itForce == forceList_.end() || itForce->jkID != jkID) {
+				continue;
+			}
+			if (!itForce->bHasEpgInfo || (itNts->jkID & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
+				itForce->bHasEpgInfo = true;
+				itForce->networkID = ci.NetworkID;
+				itForce->transportStreamID = ci.TransportStreamID;
+				itForce->serviceID = ci.ServiceID;
+				itForce->eventName.clear();
+				itForce->eventNameUpdateTick = 0;
+			}
+		}
+	}
+#endif
+}
+
+void CNicoJK::UpdateForceElemEventName(FORCE_ELEM *pElem, ULONGLONG nowTick)
+{
+#if TVTEST_PLUGIN_VERSION >= TVTEST_PLUGIN_VERSION_(0, 0, 12)
+	if (!pElem->bHasEpgInfo || nowTick < pElem->eventNameUpdateTick) {
+		return;
+	}
+
+	pElem->eventName.clear();
+	pElem->eventNameUpdateTick = nowTick + 10000;
+
+	TVTest::EpgEventQueryInfo query = {};
+	query.NetworkID = pElem->networkID;
+	query.TransportStreamID = pElem->transportStreamID;
+	query.ServiceID = pElem->serviceID;
+	query.Type = TVTest::EPG_EVENT_QUERY_TIME;
+	query.Flags = 0;
+	GetSystemTimeAsFileTime(&query.Time);
+	const ULONGLONG filetimeSecond = 10000000ULL;
+	const ULONGLONG eventNameLeadTime = 30ULL * filetimeSecond;
+	ULONGLONG queryTime = (static_cast<ULONGLONG>(query.Time.dwHighDateTime) << 32) | query.Time.dwLowDateTime;
+	queryTime += eventNameLeadTime;
+	query.Time.dwLowDateTime = static_cast<DWORD>(queryTime);
+	query.Time.dwHighDateTime = static_cast<DWORD>(queryTime >> 32);
+
+	TVTest::EpgEventInfo *pEvent = m_pApp->GetEpgEventInfo(&query);
+	if (!pEvent) {
+		return;
+	}
+	if (pEvent->pszEventName) {
+		pElem->eventName = pEvent->pszEventName;
+	}
+
+	FILETIME ftStart = {};
+	ULONGLONG updateTick = nowTick + 60000;
+	if (pEvent->Duration > 0 && SystemTimeToFileTime(&pEvent->StartTime, &ftStart)) {
+		const ULONGLONG jstOffset = 9ULL * 60 * 60 * filetimeSecond;
+		ULONGLONG startTime = (static_cast<ULONGLONG>(ftStart.dwHighDateTime) << 32) | ftStart.dwLowDateTime;
+		if (startTime >= jstOffset) {
+			ULONGLONG endTime = startTime - jstOffset + static_cast<ULONGLONG>(pEvent->Duration) * filetimeSecond;
+			if (endTime > queryTime) {
+				updateTick = nowTick + (endTime - queryTime) / 10000ULL;
+			} else {
+				updateTick = nowTick + 10000;
+			}
+		}
+	}
+	pElem->eventNameUpdateTick = updateTick;
+	m_pApp->FreeEpgEventInfo(pEvent);
+#else
+	static_cast<void>(pElem);
+	static_cast<void>(nowTick);
+#endif
 }
 
 void CNicoJK::LoadRplListFromIni(LPCTSTR section, std::vector<RPL_ELEM> *pRplList)
@@ -1469,6 +1595,15 @@ static int GetBrightness(COLORREF cr)
 	return 3 * GetRValue(cr) + 6 * GetGValue(cr) + GetBValue(cr);
 }
 
+static COLORREF GetForceColor(int force)
+{
+	if (force <= 0) return RGB(0x80, 0x80, 0x80);// 灰色
+	if (force <= 50) return RGB(0x00, 0x80, 0x00);//緑
+	if (force <= 100) return RGB(0x00, 0x80, 0xFF);//青
+	if (force <= 200) return RGB(0xFF, 0x80, 0x00);//オレンジ
+	return RGB(0xFF, 0x00, 0x00);//赤
+}
+
 // コメント(chatタグ)1行を解釈してコメントウィンドウに送る
 bool CNicoJK::ProcessChatTag(const char *tag, bool bShow, int showDelay, bool *pbRefuge)
 {
@@ -1613,6 +1748,197 @@ void CNicoJK::GetPostComboBoxText(LPTSTR comm, size_t commSize, LPTSTR mail, siz
 	_tcsncpy_s(comm, commSize, &text[i], _TRUNCATE);
 }
 
+static LPCTSTR GetLocalCommandHelpText()
+{
+	return
+		TEXT("@help\tヘルプを表示")
+		TEXT("\r\n@sw\t投稿先を切り替える。")
+		TEXT("\r\n@fopa N\t勢い窓の透過レベル1～10(Nを省略すると10)。")
+		TEXT("\r\n@mask N\tログの時間(ID)部の省略マスク(Nを省略すると0)。")
+		TEXT("\r\n@opa N\tコメントの透過レベル0～10(Nを省略すると10)。")
+		TEXT("\r\n@fwd N\tコメントをNミリ秒だけ前進")
+		TEXT("\r\n@fwds N\tコメントをN秒だけ前進")
+		TEXT("\r\n@jmp yyMMddHHmm\tコメントを指定の年月日時分に移動")
+		TEXT("\r\n@size N\tコメントの文字サイズをN%にする(Nを省略すると100%)。")
+		TEXT("\r\n@speed N\tコメントの速度をN%にする(Nを省略すると100%)。")
+		TEXT("\r\n@rl\t置換リストのすべてのCommentをリストする")
+		TEXT("\r\n@rr\t置換リストを設定ファイルから再読み込みする")
+		TEXT("\r\n@ra N\tPatternN0～N9を有効にする")
+		TEXT("\r\n@rm N\tPatternN0～N9を無効にする")
+		TEXT("\r\n@debug N\tデバッグ0～15");
+}
+
+void CNicoJK::ShowLocalCommandHelp()
+{
+	if (!hHelpWindow_) {
+		RECT rc = {};
+		if (hForce_) {
+			GetWindowRect(hForce_, &rc);
+		}
+		int x = rc.left ? rc.left + 32 : CW_USEDEFAULT;
+		int y = rc.top ? rc.top + 32 : CW_USEDEFAULT;
+		int w = 520;
+		int h = 320;
+		hHelpWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.help"), TEXT("NicoJK - ローカルコマンド"),
+		                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
+		                              x, y, w, h, hForce_, nullptr, g_hinstDLL, this);
+	}
+	if (hHelpWindow_) {
+		if (hHelpEdit_) {
+			SetWindowText(hHelpEdit_, GetLocalCommandHelpText());
+			UpdateWindowTheme();
+		}
+		ShowWindow(hHelpWindow_, SW_SHOWNORMAL);
+		SetForegroundWindow(hHelpWindow_);
+	}
+}
+
+static std::string ToUtf8String(LPCTSTR text)
+{
+#ifdef UNICODE
+	int len = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+	if (len <= 0) {
+		return std::string();
+	}
+	std::string ret(len - 1, '\0');
+	if (!ret.empty()) {
+		WideCharToMultiByte(CP_UTF8, 0, text, -1, &ret[0], len, nullptr, nullptr);
+	}
+	return ret;
+#else
+	return text ? text : "";
+#endif
+}
+
+static bool HasLineBreak(const std::string &text)
+{
+	return text.find_first_of("\r\n") != std::string::npos;
+}
+
+bool CNicoJK::StartJkcnslLogin(LPCTSTR mail, LPCTSTR password)
+{
+	if (!hForce_ || !mail || !password) {
+		return false;
+	}
+	loginMail_ = ToUtf8String(mail);
+	loginPassword_ = ToUtf8String(password);
+	if (loginMail_.empty() || loginPassword_.empty() || HasLineBreak(loginMail_) || HasLineBreak(loginPassword_)) {
+		OutputMessageLog(TEXT("Error:ログイン情報が不正です。"));
+		loginMail_.clear();
+		loginPassword_.clear();
+		return false;
+	}
+
+	loginStream_.Close();
+	loginBuf_.clear();
+	loginState_ = LOGIN_STATE_SET_MAIL;
+	std::string command = "mail " + loginMail_;
+	if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', command.c_str())) {
+		OutputMessageLog(TEXT("Error:jkcnslへのログイン設定送信に失敗しました。"));
+		loginState_ = LOGIN_STATE_IDLE;
+		return false;
+	}
+	OutputMessageLog(TEXT("ニコニコログイン情報をjkcnslに送信しています。"));
+	return true;
+}
+
+bool CNicoJK::SendJkcnslLoginOtp(LPCTSTR otp)
+{
+	if (loginState_ != LOGIN_STATE_WAIT_2FA || !otp) {
+		return false;
+	}
+	std::string otpUtf8 = ToUtf8String(otp);
+	if (otpUtf8.empty() || HasLineBreak(otpUtf8)) {
+		return false;
+	}
+	if (!loginStream_.Send(hForce_, WMS_LOGIN, '+', otpUtf8.c_str())) {
+		OutputMessageLog(TEXT("Error:2段階認証コードの送信に失敗しました。"));
+		return false;
+	}
+	OutputMessageLog(TEXT("2段階認証コードを送信しました。"));
+	return true;
+}
+
+bool CNicoJK::CancelJkcnslLogin()
+{
+	if (loginState_ == LOGIN_STATE_IDLE) {
+		return false;
+	}
+	if (loginState_ == LOGIN_STATE_WAIT_2FA) {
+		loginStream_.Shutdown();
+	}
+	loginState_ = LOGIN_STATE_IDLE;
+	loginMail_.clear();
+	loginPassword_.clear();
+	loginBuf_.clear();
+	OutputMessageLog(TEXT("ニコニコログインを中止しました。"));
+	return true;
+}
+
+void CNicoJK::ProcessJkcnslLoginRecv()
+{
+	int ret = loginStream_.ProcessRecv(loginBuf_);
+	if (!loginBuf_.empty()) {
+		loginBuf_.push_back('\0');
+		const char *p = loginBuf_.data();
+		while (*p) {
+			const char *pEnd = strchr(p, '\n');
+			std::string line(p, pEnd ? pEnd : p + strlen(p));
+			if (!line.empty() && line.back() == '\r') {
+				line.pop_back();
+			}
+			if (line.find("2FA") != std::string::npos || line.find("one-time password") != std::string::npos) {
+				loginState_ = LOGIN_STATE_WAIT_2FA;
+				OutputMessageLog(TEXT("2段階認証コードの入力が必要です。"));
+			} else if (!line.empty()) {
+				TCHAR text[256];
+				int len = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, text, _countof(text) - 1);
+				text[max(len, 0)] = TEXT('\0');
+				OutputMessageLog(text);
+			}
+			if (!pEnd) {
+				break;
+			}
+			p = pEnd + 1;
+		}
+		loginBuf_.clear();
+	}
+	if (ret >= 0) {
+		return;
+	}
+
+	if (ret != -2) {
+		OutputMessageLog(TEXT("Error:jkcnslログイン処理に失敗しました。"));
+		loginState_ = LOGIN_STATE_IDLE;
+		loginMail_.clear();
+		loginPassword_.clear();
+		return;
+	}
+
+	if (loginState_ == LOGIN_STATE_SET_MAIL) {
+		loginState_ = LOGIN_STATE_SET_PASSWORD;
+		std::string command = "password " + loginPassword_;
+		if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', command.c_str())) {
+			OutputMessageLog(TEXT("Error:jkcnslへのパスワード送信に失敗しました。"));
+			loginState_ = LOGIN_STATE_IDLE;
+		}
+	} else if (loginState_ == LOGIN_STATE_SET_PASSWORD) {
+		loginPassword_.clear();
+		loginState_ = LOGIN_STATE_LOGIN;
+		if (!loginStream_.Send(hForce_, WMS_LOGIN, 'A', "i")) {
+			OutputMessageLog(TEXT("Error:jkcnslログイン開始に失敗しました。"));
+			loginState_ = LOGIN_STATE_IDLE;
+		}
+	} else if (loginState_ == LOGIN_STATE_LOGIN || loginState_ == LOGIN_STATE_WAIT_2FA) {
+		OutputMessageLog(TEXT("ニコニコログインに成功しました。"));
+		loginState_ = LOGIN_STATE_IDLE;
+		loginMail_.clear();
+		loginPassword_.clear();
+	} else {
+		loginState_ = LOGIN_STATE_IDLE;
+	}
+}
+
 // コメント投稿欄のローカルコマンドを処理する
 void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 {
@@ -1628,23 +1954,7 @@ void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 	}
 	int nArg = static_cast<int>(min<LONGLONG>(max<LONGLONG>(llArg, INT_MIN), INT_MAX));
 	if (!_tcsicmp(cmd, TEXT("help"))) {
-		static const TCHAR text[] =
-			TEXT("@help\tヘルプを表示")
-			TEXT("\n@sw\t投稿先を切り替える。")
-			TEXT("\n@fopa N\t勢い窓の透過レベル1～10(Nを省略すると10)。")
-			TEXT("\n@mask N\tログの時間(ID)部の省略マスク(Nを省略すると0)。")
-			TEXT("\n@opa N\tコメントの透過レベル0～10(Nを省略すると10)。")
-			TEXT("\n@fwd N\tコメントをNミリ秒だけ前進")
-			TEXT("\n@fwds N\tコメントをN秒だけ前進")
-			TEXT("\n@jmp yyMMddHHmm\tコメントを指定の年月日時分に移動")
-			TEXT("\n@size N\tコメントの文字サイズをN%にする(Nを省略すると100%)。")
-			TEXT("\n@speed N\tコメントの速度をN%にする(Nを省略すると100%)。")
-			TEXT("\n@rl\t置換リストのすべてのCommentをリストする")
-			TEXT("\n@rr\t置換リストを設定ファイルから再読み込みする")
-			TEXT("\n@ra N\tPatternN0～N9を有効にする")
-			TEXT("\n@rm N\tPatternN0～N9を無効にする")
-			TEXT("\n@debug N\tデバッグ0～15");
-		MessageBox(hForce_, text, TEXT("NicoJK - ローカルコマンド"), MB_OK);
+		ShowLocalCommandHelp();
 	} else if (!_tcsicmp(cmd, TEXT("sw"))) {
 		if (s_.bRefugeMixing) {
 			bPostToRefuge_ = !bPostToRefuge_;
@@ -2266,6 +2576,63 @@ LRESULT CALLBACK CNicoJK::ForceWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 	return pThis ? pThis->ForceWindowProcMain(hwnd, uMsg, wParam, lParam) : DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+LRESULT CALLBACK CNicoJK::HelpWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	if (uMsg == WM_CREATE) {
+		CNicoJK *pThis = reinterpret_cast<CNicoJK*>(reinterpret_cast<LPCREATESTRUCT>(lParam)->lpCreateParams);
+		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
+		if (pThis) {
+			pThis->hHelpWindow_ = hwnd;
+			BOOL value = TRUE;
+			::DwmSetWindowAttribute(pThis->hHelpWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(value));
+
+			pThis->hHelpEdit_ = CreateWindowEx(0/*WS_EX_CLIENTEDGE*/, TEXT("EDIT"), GetLocalCommandHelpText(),
+			                                   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+			                                   0, 0, 0, 0, hwnd, nullptr, g_hinstDLL, nullptr);
+
+
+			if (pThis->hHelpEdit_) {
+				HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+				SendMessage(pThis->hHelpEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
+				int tabs = 72;
+				SendMessage(pThis->hHelpEdit_, EM_SETTABSTOPS, 1, reinterpret_cast<LPARAM>(&tabs));
+			}
+		}
+		return 0;
+	}
+
+	CNicoJK *pThis = reinterpret_cast<CNicoJK*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+	switch (uMsg) {
+	case WM_SIZE:
+		if (pThis && pThis->hHelpEdit_) {
+			MoveWindow(pThis->hHelpEdit_, 0, 0, LOWORD(lParam), HIWORD(lParam), TRUE);
+		}
+		return 0;
+	case WM_CLOSE:
+		ShowWindow(hwnd, SW_HIDE);
+		return 0;
+	case WM_CTLCOLORSTATIC:
+	case WM_CTLCOLOREDIT:
+		if (pThis && reinterpret_cast<HWND>(lParam) == pThis->hHelpEdit_) {
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			HDC hdc = reinterpret_cast<HDC>(wParam);
+			SetTextColor(hdc, pThis->panelColor_.GetPanelText());
+			SetBkColor(hdc, pThis->panelColor_.GetPanelBack());
+			return reinterpret_cast<LRESULT>(pThis->panelColor_.GetPanelBackBrush());
+		}
+		break;
+	case WM_DESTROY:
+		if (pThis) {
+			pThis->hHelpEdit_ = nullptr;
+			pThis->hHelpWindow_ = nullptr;
+		}
+		break;
+	}
+	return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
 bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 {
 	int dpi = m_pApp->GetDPIFromWindow(hwnd);
@@ -2438,9 +2805,15 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 			SendMessage(hCombo, CB_SETEDITSEL, selStart, selEnd);
 		}
 	}
-	if(hForceTooltip_)
-	{
+	if (hForceTooltip_) {
 		SetWindowTheme(hForceTooltip_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+	}
+	if (hHelpWindow_) {
+		SetWindowTheme(hHelpWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+	}
+	if (hHelpEdit_) {
+		SetWindowTheme(hHelpEdit_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+		InvalidateRect(hHelpEdit_, nullptr, TRUE);
 	}
 	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
 		reinterpret_cast<LONG_PTR>(CreateSolidBrush(panelColor_.GetPanelBack()))));
@@ -2600,6 +2973,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				DestroyWindow(hForceTooltip_);
 				hForceTooltip_ = nullptr;
 			}
+			if (hHelpWindow_) {
+				DestroyWindow(hHelpWindow_);
+				hHelpWindow_ = nullptr;
+				hHelpEdit_ = nullptr;
+			}
 			// 投稿欄のサブクラス化を解除
 			COMBOBOXINFO cbi = {};
 			cbi.cbSize = sizeof(cbi);
@@ -2630,9 +3008,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 
 			channelStream_.BeginClose();
 			jkStream_.BeginClose();
+			loginStream_.BeginClose();
 			jkTransfer_.BeginClose();
 			channelStream_.Close();
 			jkStream_.Close();
+			loginStream_.Close();
 			jkTransfer_.Close();
 			currentJK_ = -1;
 
@@ -2793,7 +3173,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							}
 							COLORREF crBk = RGB(0xFF, 0xFF, 0xFF);
 							COLORREF crMiddle = RGB(0, 0, 0);
+							COLORREF crSuffix = RGB(0, 0, 0);
 							size_t leftLen = 0;
+							size_t suffixLen = 0;
 							if (pText[0] == TEXT('[')) {
 								LPCTSTR pEnd = _tcschr(++pText, TEXT(']'));
 								if (pEnd) {
@@ -2804,12 +3186,24 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 										p = _tcschr(p, TEXT(','));
 										if (p && p < pEnd) {
 											leftLen = _tcstol(++p, nullptr, 10);
+											p = _tcschr(p, TEXT(','));
+											if (p && p < pEnd) {
+												crSuffix = _tcstol(++p, nullptr, 10);
+												p = _tcschr(p, TEXT(','));
+												if (p && p < pEnd) {
+													suffixLen = _tcstol(++p, nullptr, 10);
+												}
+											}
 										}
 									}
 									pText = pEnd + 1;
 								}
 							}
 							COLORREF crText = bEmphasis && !bSelected ? RGB(0xFF, 0, 0) : crItemText;
+							if (bSelected) {
+								crMiddle = RGB(0, 0, 0);
+								crSuffix = RGB(0, 0, 0);
+							}
 							// rc は memDC 座標系 (0 起点)
 							RECT rc = {1, 0, itemW, itemH};
 
@@ -2842,10 +3236,17 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 									bHasFixed = false;
 								}
 							}
+							tstring tailText(pText);
+							tstring suffixText;
+							if (suffixLen > 0 && suffixLen <= tailText.size()) {
+								suffixText = tailText.substr(tailText.size() - suffixLen);
+								tailText.resize(tailText.size() - suffixLen);
+							}
 
 							// 絵文字 (サロゲートペア) を含む場合のみ D2D を使用、それ以外は高速 GDI パス
 							bool bNeedD2D = pD2DTarget_ && pDWriteFormat_ &&
-							                (ContainsEmoji(pText) ||
+							                (ContainsEmoji(tailText.c_str()) ||
+							                 ContainsEmoji(suffixText.c_str()) ||
 							                 (bHasFixed && (ContainsEmoji(drawText.c_str()) ||
 							                                ContainsEmoji(drawMiddleText.c_str()))));
 
@@ -2905,7 +3306,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 									}
 									crText = GetBrightness(crBk) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
 								}
-								drawSegDW(tstring(pText), crText);
+								drawSegDW(tailText, crText);
+								if (!suffixText.empty()) {
+									rc.left += measureDW(tailText);
+									drawSegDW(suffixText, crSuffix != RGB(0, 0, 0) ? crSuffix : crText);
+								}
 
 								if (FAILED(pD2DTarget_->EndDraw())) {
 									pD2DTarget_->Release(); pD2DTarget_ = nullptr;
@@ -2951,7 +3356,16 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 									SetBkMode(hdcMem, OPAQUE);
 									SetTextColor(hdcMem, GetBrightness(crBk) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0));
 								}
-								DrawText(hdcMem, pText, -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+								DrawText(hdcMem, tailText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+								if (!suffixText.empty()) {
+									RECT rcCalc = rc;
+									DrawText(hdcMem, tailText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
+									rc.left += rcCalc.right - rcCalc.left;
+									if (crSuffix != RGB(0, 0, 0)) {
+										SetTextColor(hdcMem, crSuffix);
+									}
+									DrawText(hdcMem, suffixText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
+								}
 								SetBkColor(hdcMem, crBkOld);
 								SetTextColor(hdcMem, crOld);
 								SetBkMode(hdcMem, oldBkMode);
@@ -3533,18 +3947,31 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 			} else {
 				// 勢いリスト表示中
-				for (auto it = forceList_.cbegin(); it != forceList_.end(); ++it) {
+				ULONGLONG nowTick = GetTickCount64();
+				for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
+					UpdateForceElemEventName(&*it, nowTick);
 					TCHAR text[256];
+					TCHAR fixedText[16];
+					tstring eventText = it->eventName.empty() ? tstring() : tstring(TEXT(" ")) + it->eventName;
+					eventText.resize(min<size_t>(eventText.size(), 63));
 					if (it->force < 0) {
-						_stprintf_s(text, TEXT("jk%d 勢? (%.63s%s%.63S)"),
-						            it->jkID, it->name.c_str(),
+						_stprintf_s(fixedText, TEXT("%03d 勢???"), it->jkID);
+						_stprintf_s(text, TEXT("[%u,%u,5,%u,%u]{%s}%s (%.63s%s%.2S)%.63s"),
+						            static_cast<DWORD>(RGB(0xFF, 0xFF, 0xFF)), static_cast<DWORD>(GetForceColor(it->force)),
+						            static_cast<DWORD>(RGB(0x9A, 0xCD, 0x32)), static_cast<UINT>(eventText.size()),
+						            fixedText, fixedText, it->name.c_str(),
 						            it->chatStreamID.empty() && it->refugeChatStreamID.empty() ? TEXT("") : TEXT("-"),
-						            (it->chatStreamID.empty() ? it->refugeChatStreamID : it->chatStreamID).c_str());
+						            (it->chatStreamID.empty() ? it->refugeChatStreamID : it->chatStreamID).c_str(),
+						            eventText.c_str());
 					} else {
-						_stprintf_s(text, TEXT("jk%d 勢%d (%.63s%s%.63S)"),
-						            it->jkID, it->force, it->name.c_str(),
+						_stprintf_s(fixedText, TEXT("%03d 勢%03d"), it->jkID, it->force);
+						_stprintf_s(text, TEXT("[%u,%u,5,%u,%u]{%s}%s (%.63s%s%.2S)%.63s"),
+						            static_cast<DWORD>(RGB(0xFF, 0xFF, 0xFF)), static_cast<DWORD>(GetForceColor(it->force)),
+						            static_cast<DWORD>(RGB(0x9A, 0xCD, 0x32)), static_cast<UINT>(eventText.size()),
+						            fixedText, fixedText, it->name.c_str(),
 						            it->chatStreamID.empty() && it->refugeChatStreamID.empty() ? TEXT("") : TEXT("-"),
-						            (it->chatStreamID.empty() ? it->refugeChatStreamID : it->chatStreamID).c_str());
+						            (it->chatStreamID.empty() ? it->refugeChatStreamID : it->chatStreamID).c_str(),
+						            eventText.c_str());
 					}
 					ListBox_AddString(hList, text);
 					if (it->jkID == currentJKToGet_) {
@@ -3711,6 +4138,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 			}
 		}
+		return TRUE;
+	case WMS_LOGIN:
+		ProcessJkcnslLoginRecv();
 		return TRUE;
 	case WMS_TRANSFER:
 		{
