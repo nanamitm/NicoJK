@@ -23,6 +23,7 @@
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite_2.h>
+#include <Vsstyle.h>
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -34,6 +35,11 @@
 #ifndef DWRITE_E_NOCOLOR
 #define DWRITE_E_NOCOLOR ((HRESULT)0x88985004L)
 #endif
+
+// ビジュアルスタイルの有効化
+#pragma comment(linker,"\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace
 {
@@ -2756,6 +2762,13 @@ LRESULT CALLBACK CNicoJK::PanelPopupWindowProc(HWND hwnd, UINT uMsg, WPARAM wPar
 			ShowWindow(pThis->hPanel_, SW_HIDE);
 			pThis->RestorePopupWindowState(hwnd);
 			ShowWindow(hwnd, SW_SHOWNA);
+			{
+				if (!pThis->panelColor_.GetPanelBackBrush()) {
+					pThis->panelColor_.SetColor(pThis->m_pApp);
+				}
+				BOOL bDarkBool = pThis->panelColor_.IsDark() ? TRUE : FALSE;
+				::DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
+			}
 			return 0;
 		case WM_CLOSE:
 			if (pThis->hForce_) {
@@ -2801,8 +2814,6 @@ LRESULT CALLBACK CNicoJK::HelpWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
 		if (pThis) {
 			pThis->hHelpWindow_ = hwnd;
-			BOOL value = TRUE;
-			::DwmSetWindowAttribute(pThis->hHelpWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(value));
 
 			pThis->hHelpEdit_ = CreateWindowEx(0/*WS_EX_CLIENTEDGE*/, TEXT("EDIT"), GetLocalCommandHelpText(),
 			                                   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
@@ -2858,8 +2869,6 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
 		if (pThis) {
 			pThis->hLoginWindow_ = hwnd;
-			BOOL value = TRUE;
-			::DwmSetWindowAttribute(pThis->hLoginWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(value));
 
 			CreateWindowEx(0, TEXT("STATIC"), TEXT("メールアドレス"),
 			               WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -2886,13 +2895,13 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			                                         WS_CHILD | WS_VISIBLE | SS_LEFT,
 			                                         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LAST_LOGIN), g_hinstDLL, nullptr);
 			CreateWindowEx(0, TEXT("BUTTON"), TEXT("ログイン"),
-			               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_START), g_hinstDLL, nullptr);
 			CreateWindowEx(0, TEXT("BUTTON"), TEXT("認証"),
-			               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_OTP), g_hinstDLL, nullptr);
 			CreateWindowEx(0, TEXT("BUTTON"), TEXT("キャンセル"),
-			               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_CANCEL), g_hinstDLL, nullptr);
 
 			HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -3010,6 +3019,62 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			return reinterpret_cast<LRESULT>(pThis->panelColor_.GetPanelBackBrush());
 		}
 		break;
+	case WM_DRAWITEM:
+		{
+			DRAWITEMSTRUCT *dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+			if (dis->CtlType != ODT_BUTTON || !pThis) {
+				break;
+			}
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			bool bDisabled = (dis->itemState & ODS_DISABLED) != 0;
+			bool bPressed  = (dis->itemState & ODS_SELECTED) != 0;
+			bool bHot      = !bDisabled && GetProp(dis->hwndItem, TEXT("Hot")) != nullptr;
+			if (pThis->panelColor_.IsDark()) {
+				COLORREF crBase = pThis->panelColor_.GetPanelBack();
+				auto ch = [](int v) -> BYTE { return static_cast<BYTE>(v < 0 ? 0 : v > 255 ? 255 : v); };
+				auto brighter = [&ch](COLORREF cr, int n) {
+					return RGB(ch(GetRValue(cr) + n), ch(GetGValue(cr) + n), ch(GetBValue(cr) + n));
+				};
+				COLORREF crBg     = bDisabled ? crBase : bPressed ? brighter(crBase, 10) : bHot ? brighter(crBase, 30) : brighter(crBase, 18);
+				COLORREF crBorder = brighter(crBase, 50);
+				COLORREF crText   = bDisabled ? brighter(crBase, 40) : pThis->panelColor_.GetPanelText();
+				HBRUSH hBrush = CreateSolidBrush(crBg);
+				FillRect(dis->hDC, &dis->rcItem, hBrush);
+				DeleteObject(hBrush);
+				HPEN hPen = CreatePen(PS_SOLID, 1, crBorder);
+				HPEN hOldPen = reinterpret_cast<HPEN>(SelectObject(dis->hDC, hPen));
+				HBRUSH hOldBrush = reinterpret_cast<HBRUSH>(SelectObject(dis->hDC, GetStockObject(NULL_BRUSH)));
+				Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
+				SelectObject(dis->hDC, hOldPen);
+				SelectObject(dis->hDC, hOldBrush);
+				DeleteObject(hPen);
+				TCHAR szText[64];
+				GetWindowText(dis->hwndItem, szText, _countof(szText));
+				SetTextColor(dis->hDC, crText);
+				SetBkMode(dis->hDC, TRANSPARENT);
+				HFONT hFont = reinterpret_cast<HFONT>(SendMessage(dis->hwndItem, WM_GETFONT, 0, 0));
+				HFONT hOldFont = hFont ? reinterpret_cast<HFONT>(SelectObject(dis->hDC, hFont)) : nullptr;
+				DrawText(dis->hDC, szText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+				if (hOldFont) SelectObject(dis->hDC, hOldFont);
+				return TRUE;
+			}
+			HTHEME hTheme = OpenThemeData(dis->hwndItem, L"BUTTON");
+			if (hTheme) {
+				int iStateId = PBS_NORMAL;
+				if (bDisabled)     iStateId = PBS_DISABLED;
+				else if (bPressed) iStateId = PBS_PRESSED;
+				else if (bHot)     iStateId = PBS_HOT;
+				TCHAR szText[64];
+				GetWindowText(dis->hwndItem, szText, _countof(szText));
+				DrawThemeBackground(hTheme, dis->hDC, BP_PUSHBUTTON, iStateId, &dis->rcItem, nullptr);
+				DrawThemeText(hTheme, dis->hDC, BP_PUSHBUTTON, iStateId, szText, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE, 0, &dis->rcItem);
+				CloseThemeData(hTheme);
+				return TRUE;
+			}
+			break;
+		}
 	case WM_DESTROY:
 		if (pThis) {
 			pThis->hLoginWindow_ = nullptr;
@@ -3043,11 +3108,26 @@ LRESULT CALLBACK CNicoJK::LoginButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
 			}
 		}
 		break;
+
+	case WM_MOUSEMOVE:
+		if (!GetProp(hwnd, TEXT("Hot"))) {
+			SetProp(hwnd, TEXT("Hot"), reinterpret_cast<HANDLE>(1));
+			TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+			TrackMouseEvent(&tme);
+			InvalidateRect(hwnd, nullptr, FALSE);
+		}
+		break;
+	case WM_MOUSELEAVE:
+		RemoveProp(hwnd, TEXT("Hot"));
+		InvalidateRect(hwnd, nullptr, FALSE);
+		break;
+
 	case WM_SIZE:
 	case WM_DESTROY:
 		BufferedPaintStopAllAnimations(hwnd);
 		break;
 	case WM_NCDESTROY:
+		RemoveProp(hwnd, TEXT("Hot"));
 		BufferedPaintStopAllAnimations(hwnd);
 		RemoveWindowSubclass(hwnd, LoginButtonSubclassProc, uIdSubclass);
 		break;
@@ -3242,15 +3322,22 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		for (int id = IDC_LOGIN_MAIL; id <= IDC_LOGIN_LABEL_OTP; ++id) {
 			HWND hItem = GetDlgItem(hLoginWindow_, id);
 			if (hItem) {
-				BOOL USE_DARK_MODE = TRUE;
-
 				::SetWindowTheme(hItem, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-				::DwmSetWindowAttribute(hItem,DWMWA_USE_IMMERSIVE_DARK_MODE, &USE_DARK_MODE,sizeof(USE_DARK_MODE));
-				//InvalidateRect(hItem, nullptr, TRUE);
 			}
 		}
+		BOOL bDarkBool = bDark ? TRUE : FALSE;
+		::DwmSetWindowAttribute(hLoginWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
 		InvalidateRect(hLoginWindow_, nullptr, TRUE);
 		UpdateWindow(hLoginWindow_);
+	}
+	if (hHelpWindow_) {
+		BOOL bDarkBool = bDark ? TRUE : FALSE;
+		::DwmSetWindowAttribute(hHelpWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
+	}
+	if (hPanelPopup_) {
+		BOOL bDarkBool = bDark ? TRUE : FALSE;
+		::DwmSetWindowAttribute(hPanelPopup_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
+		SetWindowPos(hPanelPopup_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 	}
 	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
 		reinterpret_cast<LONG_PTR>(CreateSolidBrush(panelColor_.GetPanelBack()))));
