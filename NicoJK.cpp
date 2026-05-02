@@ -18,12 +18,14 @@
 #include "NicoJK.h"
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <commctrl.h>
 #include <uxtheme.h>
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite_2.h>
 
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
@@ -100,9 +102,24 @@ const UINT WM_SET_ZORDER = WM_APP + 107;
 const UINT WM_POST_COMMENT = WM_APP + 108;
 const UINT WM_TOGGLE_LOG_LIST_NG = WM_APP + 109;
 const UINT WM_GET_LOG_LIST_NG_STATE = WM_APP + 110;
+const UINT WMS_LOGIN_SETTINGS = WM_APP + 111;
 
 const UINT ID_FORCE_LIST_COPY = 1;
 const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
+
+enum {
+	IDC_LOGIN_MAIL = 2001,
+	IDC_LOGIN_PASSWORD,
+	IDC_LOGIN_OTP,
+	IDC_LOGIN_STATUS,
+	IDC_LOGIN_LAST_LOGIN,
+	IDC_LOGIN_BUTTON_START,
+	IDC_LOGIN_BUTTON_OTP,
+	IDC_LOGIN_BUTTON_CANCEL,
+	IDC_LOGIN_LABEL_MAIL,
+	IDC_LOGIN_LABEL_PASSWORD,
+	IDC_LOGIN_LABEL_OTP,
+};
 
 enum {
 	TIMER_UPDATE = 1,
@@ -334,6 +351,12 @@ CNicoJK::CNicoJK()
 	, hForceTooltip_(nullptr)
 	, hHelpWindow_(nullptr)
 	, hHelpEdit_(nullptr)
+	, hLoginWindow_(nullptr)
+	, hLoginMailEdit_(nullptr)
+	, hLoginPasswordEdit_(nullptr)
+	, hLoginOtpEdit_(nullptr)
+	, hLoginStatus_(nullptr)
+	, hLoginLastLogin_(nullptr)
 	, hbrForcePostEditBox_(nullptr)
 	, hForceFont_(nullptr)
 	, pDWriteFactory_(nullptr)
@@ -362,6 +385,7 @@ CNicoJK::CNicoJK()
 	, forwardOffset_(0)
 	, forwardOffsetDelta_(0)
 	, loginState_(LOGIN_STATE_IDLE)
+	, bLoginSettingsQuerying_(false)
 	, currentJKToGet_(-1)
 	, currentJK_(-1)
 	, currentJKChatCount_(0)
@@ -447,6 +471,17 @@ bool CNicoJK::Initialize()
 	wcHelp.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 	wcHelp.lpszClassName = TEXT("ru.jk.help");
 	if (RegisterClassEx(&wcHelp) == 0) {
+		return false;
+	}
+	WNDCLASSEX wcLogin = {};
+	wcLogin.cbSize = sizeof(wcLogin);
+	wcLogin.style = CS_HREDRAW | CS_VREDRAW;
+	wcLogin.lpfnWndProc = LoginWindowProc;
+	wcLogin.hInstance = g_hinstDLL;
+	wcLogin.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	wcLogin.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+	wcLogin.lpszClassName = TEXT("ru.jk.login");
+	if (RegisterClassEx(&wcLogin) == 0) {
 		return false;
 	}
 	// 初期化処理
@@ -1039,6 +1074,24 @@ void CNicoJK::UpdateForceListEpgInfo()
 #endif
 }
 
+void CNicoJK::ResetForceListEpgInfo()
+{
+#if TVTEST_PLUGIN_VERSION >= TVTEST_PLUGIN_VERSION_(0, 0, 12)
+	for (auto &elem : forceList_) {
+		elem.bHasEpgInfo = false;
+		elem.networkID = 0;
+		elem.transportStreamID = 0;
+		elem.serviceID = 0;
+		elem.eventName.clear();
+		elem.eventNameUpdateTick = 0;
+	}
+	UpdateForceListEpgInfo();
+	if (hForce_) {
+		SendMessage(hForce_, WM_UPDATE_LIST, TRUE, 0);
+	}
+#endif
+}
+
 void CNicoJK::UpdateForceElemEventName(FORCE_ELEM *pElem, ULONGLONG nowTick)
 {
 #if TVTEST_PLUGIN_VERSION >= TVTEST_PLUGIN_VERSION_(0, 0, 12)
@@ -1448,6 +1501,7 @@ LRESULT CALLBACK CNicoJK::EventCallback(UINT Event, LPARAM lParam1, LPARAM lPara
 		// ドライバが変更された
 		if (pThis->hForce_) {
 			pThis->bUsingLogfileDriver_ = pThis->IsMatchDriverName(pThis->s_.logfileDrivers.c_str());
+			pThis->ResetForceListEpgInfo();
 		}
 		// FALL THROUGH!
 	case TVTest::EVENT_CHANNELCHANGE:
@@ -1765,6 +1819,7 @@ static LPCTSTR GetLocalCommandHelpText()
 		TEXT("\r\n@rr\t置換リストを設定ファイルから再読み込みする")
 		TEXT("\r\n@ra N\tPatternN0～N9を有効にする")
 		TEXT("\r\n@rm N\tPatternN0～N9を無効にする")
+		TEXT("\r\n@login\tニコニコログイン画面を表示")
 		TEXT("\r\n@debug N\tデバッグ0～15");
 }
 
@@ -1793,6 +1848,96 @@ void CNicoJK::ShowLocalCommandHelp()
 	}
 }
 
+void CNicoJK::ShowNicoLoginWindow()
+{
+	if (!hLoginWindow_) {
+		RECT rc = {};
+		if (hForce_) {
+			GetWindowRect(hForce_, &rc);
+		}
+		int x = rc.left ? rc.left + 48 : CW_USEDEFAULT;
+		int y = rc.top ? rc.top + 48 : CW_USEDEFAULT;
+		int w = 420;
+		int h = 220;
+		hLoginWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.login"), TEXT("NicoJK - ニコニコログイン"),
+		                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+		                               x, y, w, h, hForce_, nullptr, g_hinstDLL, this);
+	}
+	if (hLoginWindow_) {
+		UpdateNicoLoginWindowState();
+		ShowWindow(hLoginWindow_, SW_SHOWNORMAL);
+		SetForegroundWindow(hLoginWindow_);
+		RequestJkcnslLoginSettings();
+		if (hLoginMailEdit_ && loginState_ == LOGIN_STATE_IDLE) {
+			SetFocus(hLoginMailEdit_);
+		}
+	}
+}
+
+void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
+{
+	if (!hLoginWindow_) {
+		return;
+	}
+	if (status && hLoginStatus_) {
+		SetWindowText(hLoginStatus_, status);
+	} else if (hLoginStatus_) {
+		switch (loginState_) {
+		case LOGIN_STATE_SET_MAIL:
+		case LOGIN_STATE_SET_PASSWORD:
+			SetWindowText(hLoginStatus_, TEXT("ログイン情報をjkcnslに送信しています。"));
+			break;
+		case LOGIN_STATE_LOGIN:
+			SetWindowText(hLoginStatus_, TEXT("jkcnslでログインしています。"));
+			break;
+		case LOGIN_STATE_WAIT_2FA:
+			SetWindowText(hLoginStatus_, TEXT("2段階認証コードを入力してください。"));
+			break;
+		default:
+			SetWindowText(hLoginStatus_, TEXT("メールアドレスとパスワードを入力してください。"));
+			break;
+		}
+	}
+	bool bWait2FA = loginState_ == LOGIN_STATE_WAIT_2FA;
+	bool bBusy = loginState_ != LOGIN_STATE_IDLE;
+	if (hLoginMailEdit_) {
+		EnableWindow(hLoginMailEdit_, !bBusy);
+	}
+	if (hLoginPasswordEdit_) {
+		EnableWindow(hLoginPasswordEdit_, !bBusy);
+	}
+	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_START), !bBusy);
+	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_OTP), bWait2FA);
+	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_CANCEL), bBusy);
+	if (hLoginOtpEdit_) {
+		EnableWindow(hLoginOtpEdit_, bWait2FA);
+		if (bWait2FA) {
+			SetFocus(hLoginOtpEdit_);
+		}
+	}
+	InvalidateRect(hLoginWindow_, nullptr, TRUE);
+}
+
+void CNicoJK::RequestJkcnslLoginSettings()
+{
+	if (!hForce_ || !hLoginMailEdit_) {
+		return;
+	}
+	if (bLoginSettingsQuerying_) {
+		loginSettingsStream_.Close();
+		loginSettingsBuf_.clear();
+		bLoginSettingsQuerying_ = false;
+	}
+	if (hLoginLastLogin_) {
+		SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 取得中..."));
+	}
+	loginSettingsStream_.Close();
+	loginSettingsBuf_.clear();
+	if (loginSettingsStream_.Send(hForce_, WMS_LOGIN_SETTINGS, 'S', "")) {
+		bLoginSettingsQuerying_ = true;
+	}
+}
+
 static std::string ToUtf8String(LPCTSTR text)
 {
 #ifdef UNICODE
@@ -1815,6 +1960,29 @@ static bool HasLineBreak(const std::string &text)
 	return text.find_first_of("\r\n") != std::string::npos;
 }
 
+static bool FormatUnixTimeLocal(const char *text, LPTSTR out, size_t outSize)
+{
+	char *endp = nullptr;
+	unsigned long long unixTime = strtoull(text, &endp, 10);
+	if (endp == text || unixTime == 0) {
+		return false;
+	}
+	const unsigned long long filetimeEpoch = 11644473600ULL;
+	const unsigned long long filetimeSecond = 10000000ULL;
+	unsigned long long ftValue = (unixTime + filetimeEpoch) * filetimeSecond;
+	FILETIME ftUtc = {};
+	ftUtc.dwLowDateTime = static_cast<DWORD>(ftValue);
+	ftUtc.dwHighDateTime = static_cast<DWORD>(ftValue >> 32);
+	FILETIME ftLocal = {};
+	SYSTEMTIME st = {};
+	if (!FileTimeToLocalFileTime(&ftUtc, &ftLocal) || !FileTimeToSystemTime(&ftLocal, &st)) {
+		return false;
+	}
+	_stprintf_s(out, outSize, TEXT("最終ログイン: %04u/%02u/%02u %02u:%02u"),
+	            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+	return true;
+}
+
 bool CNicoJK::StartJkcnslLogin(LPCTSTR mail, LPCTSTR password)
 {
 	if (!hForce_ || !mail || !password) {
@@ -1823,9 +1991,7 @@ bool CNicoJK::StartJkcnslLogin(LPCTSTR mail, LPCTSTR password)
 	loginMail_ = ToUtf8String(mail);
 	loginPassword_ = ToUtf8String(password);
 	if (loginMail_.empty() || loginPassword_.empty() || HasLineBreak(loginMail_) || HasLineBreak(loginPassword_)) {
-		OutputMessageLog(TEXT("Error:ログイン情報が不正です。"));
-		loginMail_.clear();
-		loginPassword_.clear();
+		UpdateNicoLoginWindowState(TEXT("ログイン情報が不正です。"));
 		return false;
 	}
 
@@ -1834,11 +2000,11 @@ bool CNicoJK::StartJkcnslLogin(LPCTSTR mail, LPCTSTR password)
 	loginState_ = LOGIN_STATE_SET_MAIL;
 	std::string command = "mail " + loginMail_;
 	if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', command.c_str())) {
-		OutputMessageLog(TEXT("Error:jkcnslへのログイン設定送信に失敗しました。"));
 		loginState_ = LOGIN_STATE_IDLE;
+		UpdateNicoLoginWindowState(TEXT("jkcnslへのログイン設定送信に失敗しました。"));
 		return false;
 	}
-	OutputMessageLog(TEXT("ニコニコログイン情報をjkcnslに送信しています。"));
+	UpdateNicoLoginWindowState();
 	return true;
 }
 
@@ -1852,10 +2018,10 @@ bool CNicoJK::SendJkcnslLoginOtp(LPCTSTR otp)
 		return false;
 	}
 	if (!loginStream_.Send(hForce_, WMS_LOGIN, '+', otpUtf8.c_str())) {
-		OutputMessageLog(TEXT("Error:2段階認証コードの送信に失敗しました。"));
+		UpdateNicoLoginWindowState(TEXT("2段階認証コードの送信に失敗しました。"));
 		return false;
 	}
-	OutputMessageLog(TEXT("2段階認証コードを送信しました。"));
+	UpdateNicoLoginWindowState(TEXT("2段階認証コードを送信しました。"));
 	return true;
 }
 
@@ -1871,7 +2037,7 @@ bool CNicoJK::CancelJkcnslLogin()
 	loginMail_.clear();
 	loginPassword_.clear();
 	loginBuf_.clear();
-	OutputMessageLog(TEXT("ニコニコログインを中止しました。"));
+	UpdateNicoLoginWindowState(TEXT("ニコニコログインを中止しました。"));
 	return true;
 }
 
@@ -1889,7 +2055,8 @@ void CNicoJK::ProcessJkcnslLoginRecv()
 			}
 			if (line.find("2FA") != std::string::npos || line.find("one-time password") != std::string::npos) {
 				loginState_ = LOGIN_STATE_WAIT_2FA;
-				OutputMessageLog(TEXT("2段階認証コードの入力が必要です。"));
+				ShowNicoLoginWindow();
+				UpdateNicoLoginWindowState(TEXT("2段階認証コードを入力してください。"));
 			} else if (!line.empty()) {
 				TCHAR text[256];
 				int len = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, text, _countof(text) - 1);
@@ -1908,10 +2075,8 @@ void CNicoJK::ProcessJkcnslLoginRecv()
 	}
 
 	if (ret != -2) {
-		OutputMessageLog(TEXT("Error:jkcnslログイン処理に失敗しました。"));
 		loginState_ = LOGIN_STATE_IDLE;
-		loginMail_.clear();
-		loginPassword_.clear();
+		UpdateNicoLoginWindowState(TEXT("jkcnslログイン処理に失敗しました。"));
 		return;
 	}
 
@@ -1919,23 +2084,74 @@ void CNicoJK::ProcessJkcnslLoginRecv()
 		loginState_ = LOGIN_STATE_SET_PASSWORD;
 		std::string command = "password " + loginPassword_;
 		if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', command.c_str())) {
-			OutputMessageLog(TEXT("Error:jkcnslへのパスワード送信に失敗しました。"));
 			loginState_ = LOGIN_STATE_IDLE;
+			UpdateNicoLoginWindowState(TEXT("jkcnslへのパスワード送信に失敗しました。"));
+		} else {
+			UpdateNicoLoginWindowState();
 		}
 	} else if (loginState_ == LOGIN_STATE_SET_PASSWORD) {
 		loginPassword_.clear();
 		loginState_ = LOGIN_STATE_LOGIN;
 		if (!loginStream_.Send(hForce_, WMS_LOGIN, 'A', "i")) {
-			OutputMessageLog(TEXT("Error:jkcnslログイン開始に失敗しました。"));
 			loginState_ = LOGIN_STATE_IDLE;
+			UpdateNicoLoginWindowState(TEXT("jkcnslログイン開始に失敗しました。"));
+		} else {
+			UpdateNicoLoginWindowState();
 		}
 	} else if (loginState_ == LOGIN_STATE_LOGIN || loginState_ == LOGIN_STATE_WAIT_2FA) {
-		OutputMessageLog(TEXT("ニコニコログインに成功しました。"));
 		loginState_ = LOGIN_STATE_IDLE;
-		loginMail_.clear();
-		loginPassword_.clear();
+		UpdateNicoLoginWindowState(TEXT("ニコニコログインに成功しました。チャンネル切替または再接続後に反映されます。"));
+		RequestJkcnslLoginSettings();
 	} else {
 		loginState_ = LOGIN_STATE_IDLE;
+		UpdateNicoLoginWindowState();
+	}
+}
+
+void CNicoJK::ProcessJkcnslLoginSettingsRecv()
+{
+	int ret = loginSettingsStream_.ProcessRecv(loginSettingsBuf_);
+	if (!loginSettingsBuf_.empty()) {
+		loginSettingsBuf_.push_back('\0');
+		const char *p = loginSettingsBuf_.data();
+		while (*p) {
+			const char *pEnd = strchr(p, '\n');
+			std::string line(p, pEnd ? pEnd : p + strlen(p));
+			if (!line.empty() && line.back() == '\r') {
+				line.pop_back();
+			}
+			static const char mailPrefix[] = "mail ";
+			if (line.compare(0, sizeof(mailPrefix) - 1, mailPrefix) == 0) {
+				const char *mail = line.c_str() + sizeof(mailPrefix) - 1;
+				if (hLoginMailEdit_ && GetWindowTextLength(hLoginMailEdit_) == 0) {
+#ifdef UNICODE
+					TCHAR text[256];
+					int len = MultiByteToWideChar(CP_UTF8, 0, mail, -1, text, _countof(text) - 1);
+					text[max(len, 0)] = TEXT('\0');
+					SetWindowText(hLoginMailEdit_, text);
+#else
+					SetWindowText(hLoginMailEdit_, mail);
+#endif
+				}
+			}
+			static const char lastLoginPrefix[] = "last_login_attempt ";
+			if (line.compare(0, sizeof(lastLoginPrefix) - 1, lastLoginPrefix) == 0 && hLoginLastLogin_) {
+				TCHAR text[64];
+				if (FormatUnixTimeLocal(line.c_str() + sizeof(lastLoginPrefix) - 1, text, _countof(text))) {
+					SetWindowText(hLoginLastLogin_, text);
+				} else {
+					SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 不明"));
+				}
+			}
+			if (!pEnd) {
+				break;
+			}
+			p = pEnd + 1;
+		}
+		loginSettingsBuf_.clear();
+	}
+	if (ret < 0) {
+		bLoginSettingsQuerying_ = false;
 	}
 }
 
@@ -1955,6 +2171,8 @@ void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 	int nArg = static_cast<int>(min<LONGLONG>(max<LONGLONG>(llArg, INT_MIN), INT_MAX));
 	if (!_tcsicmp(cmd, TEXT("help"))) {
 		ShowLocalCommandHelp();
+	} else if (!_tcsicmp(cmd, TEXT("login"))) {
+		ShowNicoLoginWindow();
 	} else if (!_tcsicmp(cmd, TEXT("sw"))) {
 		if (s_.bRefugeMixing) {
 			bPostToRefuge_ = !bPostToRefuge_;
@@ -2633,6 +2851,210 @@ LRESULT CALLBACK CNicoJK::HelpWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 	return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	if (uMsg == WM_CREATE) {
+		CNicoJK *pThis = reinterpret_cast<CNicoJK*>(reinterpret_cast<LPCREATESTRUCT>(lParam)->lpCreateParams);
+		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
+		if (pThis) {
+			pThis->hLoginWindow_ = hwnd;
+			BOOL value = TRUE;
+			::DwmSetWindowAttribute(pThis->hLoginWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(value));
+
+			CreateWindowEx(0, TEXT("STATIC"), TEXT("メールアドレス"),
+			               WS_CHILD | WS_VISIBLE | SS_LEFT,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LABEL_MAIL), g_hinstDLL, nullptr);
+			pThis->hLoginMailEdit_ = CreateWindowEx(0, TEXT("EDIT"), nullptr,
+			                                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+			                                        0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_MAIL), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("STATIC"), TEXT("パスワード"),
+			               WS_CHILD | WS_VISIBLE | SS_LEFT,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LABEL_PASSWORD), g_hinstDLL, nullptr);
+			pThis->hLoginPasswordEdit_ = CreateWindowEx(0, TEXT("EDIT"), nullptr,
+			                                            WS_CHILD | WS_VISIBLE | ES_PASSWORD | ES_AUTOHSCROLL,
+			                                            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_PASSWORD), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("STATIC"), TEXT("2段階認証コード"),
+			               WS_CHILD | WS_VISIBLE | SS_LEFT,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LABEL_OTP), g_hinstDLL, nullptr);
+			pThis->hLoginOtpEdit_ = CreateWindowEx(/*WS_EX_CLIENTEDGE*/0, TEXT("EDIT"), nullptr,
+			                                       WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+			                                       0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_OTP), g_hinstDLL, nullptr);
+			pThis->hLoginStatus_ = CreateWindowEx(0, TEXT("STATIC"), nullptr,
+			                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
+			                                      0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_STATUS), g_hinstDLL, nullptr);
+			pThis->hLoginLastLogin_ = CreateWindowEx(0, TEXT("STATIC"), TEXT("最終ログイン: 未取得"),
+			                                         WS_CHILD | WS_VISIBLE | SS_LEFT,
+			                                         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LAST_LOGIN), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("BUTTON"), TEXT("ログイン"),
+			               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_START), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("BUTTON"), TEXT("認証"),
+			               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_OTP), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("BUTTON"), TEXT("キャンセル"),
+			               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_CANCEL), g_hinstDLL, nullptr);
+
+			HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+			for (int id = IDC_LOGIN_MAIL; id <= IDC_LOGIN_LABEL_OTP; ++id) {
+				HWND hItem = GetDlgItem(hwnd, id);
+				if (hItem) {
+					SendMessage(hItem, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
+				}
+			}
+			int buttonIds[] = {IDC_LOGIN_BUTTON_START, IDC_LOGIN_BUTTON_OTP, IDC_LOGIN_BUTTON_CANCEL};
+			for (int id : buttonIds) {
+				HWND hButton = GetDlgItem(hwnd, id);
+				if (hButton) {
+					SetWindowSubclass(hButton, LoginButtonSubclassProc, 1, reinterpret_cast<DWORD_PTR>(pThis));
+				}
+			}
+			pThis->UpdateNicoLoginWindowState();
+		}
+		return 0;
+	}
+
+	CNicoJK *pThis = reinterpret_cast<CNicoJK*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+	auto layout = [hwnd, pThis]() {
+		RECT rc = {};
+		GetClientRect(hwnd, &rc);
+		int dpi = pThis && pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
+		if (dpi == 0) {
+			dpi = 96;
+		}
+		int margin = 12 * dpi / 96;
+		int gap = 8 * dpi / 96;
+		int labelW = 104 * dpi / 96;
+		int editH = 22 * dpi / 96;
+		int buttonW = 84 * dpi / 96;
+		int buttonH = 26 * dpi / 96;
+		int otpButtonW = 56 * dpi / 96;
+		int y = margin;
+		int editX = margin + labelW;
+		int editW = max<int>(80, static_cast<int>(rc.right) - editX - margin);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_MAIL), margin, y + 3 * dpi / 96, labelW, editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_MAIL), editX, y, max(40, editW - buttonW - gap), editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_START), rc.right - margin - buttonW, y - 2 * dpi / 96, buttonW, buttonH, TRUE);
+		y += editH + gap;
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_PASSWORD), margin, y + 3 * dpi / 96, labelW, editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_PASSWORD), editX, y, editW, editH, TRUE);
+		y += editH + gap;
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_OTP), margin, y + 3 * dpi / 96, labelW, editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_OTP), editX, y, max(40, editW - otpButtonW * 2 - gap * 2), editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_OTP), rc.right - margin - otpButtonW * 2 - gap, y - 2 * dpi / 96, otpButtonW, buttonH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_CANCEL), rc.right - margin - otpButtonW, y - 2 * dpi / 96, otpButtonW, buttonH, TRUE);
+		y += editH + gap;
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_STATUS), margin, y, rc.right - margin * 2, editH, TRUE);
+		y += editH + gap + gap;
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LAST_LOGIN), margin, y, rc.right - margin * 2, editH, TRUE);
+	};
+
+	switch (uMsg) {
+	case WM_ERASEBKGND:
+		if (pThis) {
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			RECT rc = {};
+			GetClientRect(hwnd, &rc);
+			FillRect(reinterpret_cast<HDC>(wParam), &rc, pThis->panelColor_.GetPanelBackBrush());
+			return TRUE;
+		}
+		break;
+	case WM_SIZE:
+		layout();
+		return 0;
+	case WM_COMMAND:
+		if (!pThis) {
+			break;
+		}
+		switch (LOWORD(wParam)) {
+		case IDC_LOGIN_BUTTON_START:
+			{
+				TCHAR mail[256];
+				TCHAR password[256];
+				GetWindowText(pThis->hLoginMailEdit_, mail, _countof(mail));
+				GetWindowText(pThis->hLoginPasswordEdit_, password, _countof(password));
+				if (pThis->StartJkcnslLogin(mail, password)) {
+					SetWindowText(pThis->hLoginPasswordEdit_, TEXT(""));
+					SetWindowText(pThis->hLoginOtpEdit_, TEXT(""));
+				}
+			}
+			return 0;
+		case IDC_LOGIN_BUTTON_OTP:
+			{
+				TCHAR otp[64];
+				GetWindowText(pThis->hLoginOtpEdit_, otp, _countof(otp));
+				if (pThis->SendJkcnslLoginOtp(otp)) {
+					SetWindowText(pThis->hLoginOtpEdit_, TEXT(""));
+				}
+			}
+			return 0;
+		case IDC_LOGIN_BUTTON_CANCEL:
+			pThis->CancelJkcnslLogin();
+			return 0;
+		}
+		break;
+	case WM_CLOSE:
+		ShowWindow(hwnd, SW_HIDE);
+		return 0;
+	case WM_CTLCOLORSTATIC:
+	case WM_CTLCOLOREDIT:
+		if (pThis) {
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			HDC hdc = reinterpret_cast<HDC>(wParam);
+			SetTextColor(hdc, pThis->panelColor_.GetPanelText());
+			SetBkColor(hdc, pThis->panelColor_.GetPanelBack());
+			return reinterpret_cast<LRESULT>(pThis->panelColor_.GetPanelBackBrush());
+		}
+		break;
+	case WM_DESTROY:
+		if (pThis) {
+			pThis->hLoginWindow_ = nullptr;
+			pThis->hLoginMailEdit_ = nullptr;
+			pThis->hLoginPasswordEdit_ = nullptr;
+			pThis->hLoginOtpEdit_ = nullptr;
+			pThis->hLoginStatus_ = nullptr;
+			pThis->hLoginLastLogin_ = nullptr;
+		}
+		break;
+	}
+	return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK CNicoJK::LoginButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+{
+	CNicoJK *pThis = reinterpret_cast<CNicoJK*>(dwRefData);
+	switch (uMsg) {
+	case WM_ENABLE:
+		// 無効状態への切替時に標準描画が先走るため、TVTest のダークモード対応と同じく再描画へ寄せる
+		if (wParam == FALSE && pThis) {
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			if (pThis->panelColor_.IsDark()) {
+				SendMessage(hwnd, WM_SETREDRAW, FALSE, 0);
+				LRESULT result = DefSubclassProc(hwnd, uMsg, wParam, lParam);
+				SendMessage(hwnd, WM_SETREDRAW, TRUE, 0);
+				InvalidateRect(hwnd, nullptr, TRUE);
+				return result;
+			}
+		}
+		break;
+	case WM_SIZE:
+	case WM_DESTROY:
+		BufferedPaintStopAllAnimations(hwnd);
+		break;
+	case WM_NCDESTROY:
+		BufferedPaintStopAllAnimations(hwnd);
+		RemoveWindowSubclass(hwnd, LoginButtonSubclassProc, uIdSubclass);
+		break;
+	}
+	return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+}
+
 bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 {
 	int dpi = m_pApp->GetDPIFromWindow(hwnd);
@@ -2815,6 +3237,21 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		SetWindowTheme(hHelpEdit_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
 		InvalidateRect(hHelpEdit_, nullptr, TRUE);
 	}
+	if (hLoginWindow_) {
+		SetWindowTheme(hLoginWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+		for (int id = IDC_LOGIN_MAIL; id <= IDC_LOGIN_LABEL_OTP; ++id) {
+			HWND hItem = GetDlgItem(hLoginWindow_, id);
+			if (hItem) {
+				BOOL USE_DARK_MODE = TRUE;
+
+				::SetWindowTheme(hItem, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+				::DwmSetWindowAttribute(hItem,DWMWA_USE_IMMERSIVE_DARK_MODE, &USE_DARK_MODE,sizeof(USE_DARK_MODE));
+				//InvalidateRect(hItem, nullptr, TRUE);
+			}
+		}
+		InvalidateRect(hLoginWindow_, nullptr, TRUE);
+		UpdateWindow(hLoginWindow_);
+	}
 	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
 		reinterpret_cast<LONG_PTR>(CreateSolidBrush(panelColor_.GetPanelBack()))));
 	InvalidateRect(hwndForce, nullptr, TRUE);
@@ -2978,6 +3415,15 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				hHelpWindow_ = nullptr;
 				hHelpEdit_ = nullptr;
 			}
+			if (hLoginWindow_) {
+				DestroyWindow(hLoginWindow_);
+				hLoginWindow_ = nullptr;
+				hLoginMailEdit_ = nullptr;
+				hLoginPasswordEdit_ = nullptr;
+				hLoginOtpEdit_ = nullptr;
+				hLoginStatus_ = nullptr;
+				hLoginLastLogin_ = nullptr;
+			}
 			// 投稿欄のサブクラス化を解除
 			COMBOBOXINFO cbi = {};
 			cbi.cbSize = sizeof(cbi);
@@ -3009,10 +3455,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			channelStream_.BeginClose();
 			jkStream_.BeginClose();
 			loginStream_.BeginClose();
+			loginSettingsStream_.BeginClose();
 			jkTransfer_.BeginClose();
 			channelStream_.Close();
 			jkStream_.Close();
 			loginStream_.Close();
+			loginSettingsStream_.Close();
 			jkTransfer_.Close();
 			currentJK_ = -1;
 
@@ -4141,6 +4589,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		return TRUE;
 	case WMS_LOGIN:
 		ProcessJkcnslLoginRecv();
+		return TRUE;
+	case WMS_LOGIN_SETTINGS:
+		ProcessJkcnslLoginSettingsRecv();
 		return TRUE;
 	case WMS_TRANSFER:
 		{

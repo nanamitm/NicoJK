@@ -176,6 +176,7 @@ private:
 	void SaveToIni();
 	void LoadForceListFromIni(const tstring &logfileFolder);
 	void UpdateForceListEpgInfo();
+	void ResetForceListEpgInfo();
 	void UpdateForceElemEventName(FORCE_ELEM *pElem, ULONGLONG nowTick);
 	void LoadRplListFromIni(LPCTSTR section, std::vector<RPL_ELEM> *pRplList);
 	void SaveRplListToIni(LPCTSTR section, const std::vector<RPL_ELEM> &rplList, bool bClearSection = true);
@@ -200,14 +201,20 @@ private:
 	void RestorePopupWindowState(HWND hwnd);
 	void UpdateWindowTheme(HWND hwnd = nullptr);
 	void ShowLocalCommandHelp();
+	void ShowNicoLoginWindow();
+	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
+	void RequestJkcnslLoginSettings();
 	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
 	bool SendJkcnslLoginOtp(LPCTSTR otp);
 	bool CancelJkcnslLogin();
 	void ProcessJkcnslLoginRecv();
+	void ProcessJkcnslLoginSettingsRecv();
 	static LRESULT CALLBACK PanelWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK PanelPopupWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK ForceWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK HelpWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+	static LRESULT CALLBACK LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+	static LRESULT CALLBACK LoginButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 	bool CreateForceWindowItems(HWND hwnd);
 	void SetOpacity(HWND hwnd, int opacityOrToggle);
 	LRESULT ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -229,6 +236,12 @@ private:
 	HWND hForceTooltip_;
 	HWND hHelpWindow_;
 	HWND hHelpEdit_;
+	HWND hLoginWindow_;
+	HWND hLoginMailEdit_;
+	HWND hLoginPasswordEdit_;
+	HWND hLoginOtpEdit_;
+	HWND hLoginStatus_;
+	HWND hLoginLastLogin_;
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
@@ -274,13 +287,16 @@ private:
 	CJKStream channelStream_;
 	CJKStream jkStream_;
 	CJKStream loginStream_;
+	CJKStream loginSettingsStream_;
 	CJKTransfer jkTransfer_;
 	std::vector<char> channelBuf_;
 	std::vector<char> jkBuf_;
 	std::vector<char> loginBuf_;
+	std::vector<char> loginSettingsBuf_;
 	std::string loginMail_;
 	std::string loginPassword_;
 	int loginState_;
+	bool bLoginSettingsQuerying_;
 	int currentJKToGet_;
 	int currentJK_;
 	int currentJKChatCount_;
