@@ -24,6 +24,7 @@
 #include <d2d1helper.h>
 #include <dwrite_2.h>
 #include <Vsstyle.h>
+#include <richedit.h>
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -112,6 +113,13 @@ const UINT WMS_LOGIN_SETTINGS = WM_APP + 111;
 
 const UINT ID_FORCE_LIST_COPY = 1;
 const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
+
+enum {
+	IDC_COMMENT_EDIT = 3001,
+	IDC_COMMENT_SEND = 3002,
+	IDC_COMMENT_DECO_FIRST = 3010,
+};
+const int IDC_COMMENT_DECO_MAX = 20;
 
 enum {
 	IDC_LOGIN_MAIL = 2001,
@@ -363,6 +371,9 @@ CNicoJK::CNicoJK()
 	, hLoginOtpEdit_(nullptr)
 	, hLoginStatus_(nullptr)
 	, hLoginLastLogin_(nullptr)
+	, hCommentWindow_(nullptr)
+	, hCommentEdit_(nullptr)
+	, commentDecoCount_(0)
 	, hbrForcePostEditBox_(nullptr)
 	, hForceFont_(nullptr)
 	, pDWriteFactory_(nullptr)
@@ -488,6 +499,18 @@ bool CNicoJK::Initialize()
 	wcLogin.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 	wcLogin.lpszClassName = TEXT("ru.jk.login");
 	if (RegisterClassEx(&wcLogin) == 0) {
+		return false;
+	}
+	LoadLibrary(TEXT("Msftedit.dll"));
+	WNDCLASSEX wcComment = {};
+	wcComment.cbSize = sizeof(wcComment);
+	wcComment.style = CS_HREDRAW | CS_VREDRAW;
+	wcComment.lpfnWndProc = CommentWindowProc;
+	wcComment.hInstance = g_hinstDLL;
+	wcComment.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	wcComment.hbrBackground = nullptr;
+	wcComment.lpszClassName = TEXT("ru.jk.comment");
+	if (RegisterClassEx(&wcComment) == 0) {
 		return false;
 	}
 	// 初期化処理
@@ -1880,6 +1903,29 @@ void CNicoJK::ShowNicoLoginWindow()
 	}
 }
 
+void CNicoJK::ShowCommentWindow()
+{
+	if (!hCommentWindow_) {
+		RECT rc = {};
+		if (hForce_) {
+			GetWindowRect(hForce_, &rc);
+		}
+		int x = rc.left ? rc.left + 16 : CW_USEDEFAULT;
+		int y = rc.top ? rc.top + 16 : CW_USEDEFAULT;
+		hCommentWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.comment"), TEXT("NicoJK - コメント投稿"),
+		                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
+		                                 x, y, 440, 180, hForce_, nullptr, g_hinstDLL, this);
+	}
+	if (hCommentWindow_) {
+		UpdateWindowTheme();
+		ShowWindow(hCommentWindow_, SW_SHOWNORMAL);
+		SetForegroundWindow(hCommentWindow_);
+		if (hCommentEdit_) {
+			SetFocus(hCommentEdit_);
+		}
+	}
+}
+
 void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 {
 	if (!hLoginWindow_) {
@@ -3135,6 +3181,251 @@ LRESULT CALLBACK CNicoJK::LoginButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
 	return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
+LRESULT CALLBACK CNicoJK::CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+{
+	if (uMsg == WM_KEYDOWN && wParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000)) {
+		SendMessage(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(IDC_COMMENT_SEND, BN_CLICKED), 0);
+		return 0;
+	}
+	if (uMsg == WM_NCDESTROY) {
+		RemoveWindowSubclass(hwnd, CommentEditSubclassProc, uIdSubclass);
+	}
+	return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	if (uMsg == WM_CREATE) {
+		CNicoJK *pThis = reinterpret_cast<CNicoJK*>(reinterpret_cast<LPCREATESTRUCT>(lParam)->lpCreateParams);
+		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
+		if (pThis) {
+			pThis->hCommentWindow_ = hwnd;
+			pThis->hCommentEdit_ = CreateWindowEx(0, TEXT("RichEdit50W"),
+			    nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL,
+			    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_COMMENT_EDIT), g_hinstDLL, nullptr);
+			if (pThis->hCommentEdit_) {
+				SendMessage(pThis->hCommentEdit_, EM_SETLIMITTEXT, POST_COMMENT_MAX - 1, 0);
+				SetWindowSubclass(pThis->hCommentEdit_, CommentEditSubclassProc, 1, 0);
+			}
+			// 装飾ラジオボタン（mailDecorations から生成）
+			pThis->commentDecoCount_ = 0;
+			for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p && pThis->commentDecoCount_ < IDC_COMMENT_DECO_MAX; ) {
+				size_t len = _tcscspn(p, TEXT(":"));
+				TCHAR label[64];
+				if (len == 0) {
+					_tcscpy_s(label, TEXT("なし"));
+				} else {
+					_tcsncpy_s(label, p, min<size_t>(len, 63));
+				}
+				DWORD style = WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON;
+				if (pThis->commentDecoCount_ == 0) style |= WS_GROUP;
+				CreateWindowEx(0, TEXT("BUTTON"), label, style,
+				    0, 0, 0, 0, hwnd,
+				    reinterpret_cast<HMENU>(IDC_COMMENT_DECO_FIRST + pThis->commentDecoCount_),
+				    g_hinstDLL, nullptr);
+				++pThis->commentDecoCount_;
+				p += p[len] ? len + 1 : len;
+			}
+			CheckDlgButton(hwnd, IDC_COMMENT_DECO_FIRST, BST_CHECKED);
+			// 送信ボタン（BS_OWNERDRAW で LoginButtonSubclassProc 共用）
+			HWND hSend = CreateWindowEx(0, TEXT("BUTTON"), TEXT("送信"),
+			    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+			    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_COMMENT_SEND), g_hinstDLL, nullptr);
+			if (hSend) {
+				SetWindowSubclass(hSend, LoginButtonSubclassProc, 1, reinterpret_cast<DWORD_PTR>(pThis));
+			}
+			HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+			for (HWND h : {pThis->hCommentEdit_, hSend}) {
+				if (h) SendMessage(h, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
+			}
+			for (int i = 0; i < pThis->commentDecoCount_; ++i) {
+				HWND h = GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i);
+				if (h) SendMessage(h, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
+			}
+		}
+		return 0;
+	}
+
+	CNicoJK *pThis = reinterpret_cast<CNicoJK*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+
+	auto applyRichEditColors = [&]() {
+		if (!pThis || !pThis->hCommentEdit_) return;
+		if (!pThis->panelColor_.GetPanelBackBrush()) {
+			pThis->panelColor_.SetColor(pThis->m_pApp);
+		}
+		if (pThis->panelColor_.IsDark()) {
+			SendMessage(pThis->hCommentEdit_, EM_SETBKGNDCOLOR, 0, pThis->panelColor_.GetPanelBack());
+			CHARFORMAT2 cf = {};
+			cf.cbSize = sizeof(cf);
+			cf.dwMask = CFM_COLOR;
+			cf.crTextColor = pThis->panelColor_.GetPanelText();
+			SendMessage(pThis->hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+		} else {
+			SendMessage(pThis->hCommentEdit_, EM_SETBKGNDCOLOR, 1, 0);
+			CHARFORMAT2 cf = {};
+			cf.cbSize = sizeof(cf);
+			cf.dwMask = CFM_COLOR;
+			cf.dwEffects = CFE_AUTOCOLOR;
+			SendMessage(pThis->hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+		}
+	};
+
+	auto layout = [hwnd, pThis]() {
+		if (!pThis) return;
+		RECT rc = {};
+		GetClientRect(hwnd, &rc);
+		int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
+		if (dpi == 0) dpi = 96;
+		int margin  = 8 * dpi / 96;
+		int gap     = 4 * dpi / 96;
+		int radioH  = 20 * dpi / 96;
+		int btnW    = 64 * dpi / 96;
+		int btnH    = 24 * dpi / 96;
+		int bottom  = static_cast<int>(rc.bottom) - margin;
+		int rowY    = bottom - btnH;
+		// 送信ボタン（右端）
+		MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_SEND), rc.right - margin - btnW, rowY, btnW, btnH, TRUE);
+		// ラジオボタン（送信ボタンの左側に均等配置）
+		int radioAreaW = rc.right - margin - btnW - gap - margin;
+		int radioW = pThis->commentDecoCount_ > 0 ? radioAreaW / pThis->commentDecoCount_ : radioAreaW;
+		for (int i = 0; i < pThis->commentDecoCount_; ++i) {
+			MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i),
+			    margin + i * radioW, rowY + (btnH - radioH) / 2, radioW, radioH, TRUE);
+		}
+		// RichEdit（残りの上部領域）
+		int editH = rowY - margin - gap;
+		MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_EDIT), margin, margin, rc.right - margin * 2, max(editH, 20), TRUE);
+	};
+
+	switch (uMsg) {
+	case WM_SIZE:
+		layout();
+		return 0;
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDC_COMMENT_SEND && pThis && pThis->hForce_) {
+			int len = GetWindowTextLength(pThis->hCommentEdit_);
+			if (len <= 0) break;
+			std::vector<TCHAR> text(len + 1);
+			GetWindowText(pThis->hCommentEdit_, text.data(), len + 1);
+			// 選択中の装飾プレフィックスを取得
+			TCHAR deco[64] = {};
+			int decoIdx = 0;
+			for (int i = 0; i < pThis->commentDecoCount_; ++i) {
+				if (IsDlgButtonChecked(hwnd, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
+					decoIdx = i;
+					break;
+				}
+			}
+			int idx = 0;
+			for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p; ) {
+				size_t slen = _tcscspn(p, TEXT(":"));
+				if (idx == decoIdx) {
+					_tcsncpy_s(deco, p, min<size_t>(slen, 63));
+					break;
+				}
+				++idx;
+				p += p[slen] ? slen + 1 : slen;
+			}
+			// IDC_CB_POST に設定して既存の投稿パスへ流す
+			TCHAR full[POST_COMMENT_MAX + 64];
+			_stprintf_s(full, TEXT("%s%s"), deco, text.data());
+			SetDlgItemText(pThis->hForce_, IDC_CB_POST, full);
+			SendMessage(pThis->hForce_, WM_POST_COMMENT, 0, 0);
+			SetWindowText(pThis->hCommentEdit_, TEXT(""));
+		}
+		break;
+	case WM_CLOSE:
+		ShowWindow(hwnd, SW_HIDE);
+		return 0;
+	case WM_SHOWWINDOW:
+		if (wParam) applyRichEditColors();
+		break;
+	case WM_ERASEBKGND:
+		if (pThis) {
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			RECT rc = {};
+			GetClientRect(hwnd, &rc);
+			FillRect(reinterpret_cast<HDC>(wParam), &rc, pThis->panelColor_.GetPanelBackBrush());
+			return TRUE;
+		}
+		break;
+	case WM_CTLCOLORSTATIC:
+	case WM_CTLCOLORBTN:
+		if (pThis) {
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			SetTextColor(reinterpret_cast<HDC>(wParam), pThis->panelColor_.GetPanelText());
+			SetBkColor(reinterpret_cast<HDC>(wParam), pThis->panelColor_.GetPanelBack());
+			return reinterpret_cast<LRESULT>(pThis->panelColor_.GetPanelBackBrush());
+		}
+		break;
+	case WM_DRAWITEM:
+		{
+			DRAWITEMSTRUCT *dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+			if (dis->CtlType != ODT_BUTTON || !pThis) break;
+			if (!pThis->panelColor_.GetPanelBackBrush()) {
+				pThis->panelColor_.SetColor(pThis->m_pApp);
+			}
+			bool bDisabled = (dis->itemState & ODS_DISABLED) != 0;
+			bool bPressed  = (dis->itemState & ODS_SELECTED) != 0;
+			bool bHot      = !bDisabled && GetProp(dis->hwndItem, TEXT("Hot")) != nullptr;
+			if (pThis->panelColor_.IsDark()) {
+				COLORREF crBase = pThis->panelColor_.GetPanelBack();
+				auto ch = [](int v) -> BYTE { return static_cast<BYTE>(v < 0 ? 0 : v > 255 ? 255 : v); };
+				auto brighter = [&ch](COLORREF cr, int n) {
+					return RGB(ch(GetRValue(cr) + n), ch(GetGValue(cr) + n), ch(GetBValue(cr) + n));
+				};
+				COLORREF crBg     = bDisabled ? crBase : bPressed ? brighter(crBase, 10) : bHot ? brighter(crBase, 30) : brighter(crBase, 18);
+				COLORREF crBorder = brighter(crBase, 50);
+				COLORREF crText   = bDisabled ? brighter(crBase, 40) : pThis->panelColor_.GetPanelText();
+				HBRUSH hBrush = CreateSolidBrush(crBg);
+				FillRect(dis->hDC, &dis->rcItem, hBrush);
+				DeleteObject(hBrush);
+				HPEN hPen = CreatePen(PS_SOLID, 1, crBorder);
+				HPEN hOldPen = reinterpret_cast<HPEN>(SelectObject(dis->hDC, hPen));
+				HBRUSH hOldBrush = reinterpret_cast<HBRUSH>(SelectObject(dis->hDC, GetStockObject(NULL_BRUSH)));
+				Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
+				SelectObject(dis->hDC, hOldPen);
+				SelectObject(dis->hDC, hOldBrush);
+				DeleteObject(hPen);
+				TCHAR szText[64];
+				GetWindowText(dis->hwndItem, szText, _countof(szText));
+				SetTextColor(dis->hDC, crText);
+				SetBkMode(dis->hDC, TRANSPARENT);
+				HFONT hFont = reinterpret_cast<HFONT>(SendMessage(dis->hwndItem, WM_GETFONT, 0, 0));
+				HFONT hOldFont = hFont ? reinterpret_cast<HFONT>(SelectObject(dis->hDC, hFont)) : nullptr;
+				DrawText(dis->hDC, szText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+				if (hOldFont) SelectObject(dis->hDC, hOldFont);
+				return TRUE;
+			}
+			HTHEME hTheme = OpenThemeData(dis->hwndItem, L"BUTTON");
+			if (hTheme) {
+				int iStateId = PBS_NORMAL;
+				if (bDisabled)     iStateId = PBS_DISABLED;
+				else if (bPressed) iStateId = PBS_PRESSED;
+				else if (bHot)     iStateId = PBS_HOT;
+				TCHAR szText[64];
+				GetWindowText(dis->hwndItem, szText, _countof(szText));
+				DrawThemeBackground(hTheme, dis->hDC, BP_PUSHBUTTON, iStateId, &dis->rcItem, nullptr);
+				DrawThemeText(hTheme, dis->hDC, BP_PUSHBUTTON, iStateId, szText, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE, 0, &dis->rcItem);
+				CloseThemeData(hTheme);
+				return TRUE;
+			}
+			break;
+		}
+	case WM_DESTROY:
+		if (pThis) {
+			pThis->hCommentWindow_ = nullptr;
+			pThis->hCommentEdit_ = nullptr;
+		}
+		break;
+	}
+	return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
 bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 {
 	int dpi = m_pApp->GetDPIFromWindow(hwnd);
@@ -3182,6 +3473,8 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_LOGIN), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("?"), WS_CHILD | WS_VISIBLE,
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("C"), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_COMMENT), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
 	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS | CBS_OWNERDRAWFIXED,
@@ -3198,6 +3491,7 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 			SendDlgItemMessage(hwnd, IDC_BUTTON_POPUP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_LOGIN, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_HELP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
+			SendDlgItemMessage(hwnd, IDC_BUTTON_COMMENT, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_FORCELIST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_CB_POST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 		}
@@ -3225,6 +3519,7 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 		addToolTip(IDC_BUTTON_POPUP, TEXT("ポップアップ表示を切り替える"));
 		addToolTip(IDC_BUTTON_LOGIN, TEXT("ニコニコログイン"));
 		addToolTip(IDC_BUTTON_HELP, TEXT("ローカルコマンドヘルプ"));
+		addToolTip(IDC_BUTTON_COMMENT, TEXT("コメント投稿ウィンドウ"));
 		return true;
 	}
 	return false;
@@ -3347,6 +3642,34 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		::DwmSetWindowAttribute(hPanelPopup_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
 		SetWindowPos(hPanelPopup_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 	}
+	if (hCommentWindow_) {
+		BOOL bDarkBool = bDark ? TRUE : FALSE;
+		::DwmSetWindowAttribute(hCommentWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
+		SetWindowTheme(hCommentWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+		for (int i = 0; i < commentDecoCount_; ++i) {
+			HWND h = GetDlgItem(hCommentWindow_, IDC_COMMENT_DECO_FIRST + i);
+			if (h) SetWindowTheme(h, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+		}
+		// RichEdit の色はメッセージで直接設定
+		if (hCommentEdit_) {
+			if (bDark) {
+				SendMessage(hCommentEdit_, EM_SETBKGNDCOLOR, 0, panelColor_.GetPanelBack());
+				CHARFORMAT2 cf = {};
+				cf.cbSize = sizeof(cf);
+				cf.dwMask = CFM_COLOR;
+				cf.crTextColor = panelColor_.GetPanelText();
+				SendMessage(hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+			} else {
+				SendMessage(hCommentEdit_, EM_SETBKGNDCOLOR, 1, 0);
+				CHARFORMAT2 cf = {};
+				cf.cbSize = sizeof(cf);
+				cf.dwMask = CFM_COLOR;
+				cf.dwEffects = CFE_AUTOCOLOR;
+				SendMessage(hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+			}
+		}
+		InvalidateRect(hCommentWindow_, nullptr, TRUE);
+	}
 	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
 		reinterpret_cast<LONG_PTR>(CreateSolidBrush(panelColor_.GetPanelBack()))));
 	InvalidateRect(hwndForce, nullptr, TRUE);
@@ -3446,6 +3769,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_POPUP), m_pApp, TVTestPanelButtonProc);
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_LOGIN), m_pApp, TVTestPanelButtonProc);
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_HELP), m_pApp, TVTestPanelButtonProc);
+				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_COMMENT), m_pApp, TVTestPanelButtonProc);
 			}
 
 			if (s_.commentShareMode == 1 || s_.commentShareMode == 2 || s_.bCheckProcessRecording) {
@@ -3504,6 +3828,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_POPUP));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_LOGIN));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_HELP));
+				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_COMMENT));
 			}
 			if (hForceTooltip_) {
 				DestroyWindow(hForceTooltip_);
@@ -3522,6 +3847,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				hLoginOtpEdit_ = nullptr;
 				hLoginStatus_ = nullptr;
 				hLoginLastLogin_ = nullptr;
+			}
+			if (hCommentWindow_) {
+				DestroyWindow(hCommentWindow_);
+				hCommentWindow_ = nullptr;
+				hCommentEdit_ = nullptr;
 			}
 			// 投稿欄のサブクラス化を解除
 			COMBOBOXINFO cbi = {};
@@ -4115,6 +4445,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			break;
 		case IDC_BUTTON_HELP:
 			ShowLocalCommandHelp();
+			break;
+		case IDC_BUTTON_COMMENT:
+			ShowCommentWindow();
 			break;
 		}
 		break;
@@ -4839,6 +5172,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_POPUP), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_LOGIN), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_HELP), swShow);
+					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_COMMENT), swShow);
 				}
 			}
 			SetWindowPos(hItem, nullptr, 0, 0, rcParent.right-rc.left*2, rcParent.bottom-rc.top-padding, SWP_NOMOVE | SWP_NOZORDER);
