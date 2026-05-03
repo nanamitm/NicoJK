@@ -202,9 +202,6 @@ private:
 	void UpdateWindowTheme(HWND hwnd = nullptr);
 	void ShowLocalCommandHelp();
 	void ShowNicoLoginWindow();
-	void ShowCommentWindow();
-	static LRESULT CALLBACK CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-	static LRESULT CALLBACK CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
 	void RequestJkcnslLoginSettings();
 	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
@@ -245,9 +242,6 @@ private:
 	HWND hLoginOtpEdit_;
 	HWND hLoginStatus_;
 	HWND hLoginLastLogin_;
-	HWND hCommentWindow_;
-	HWND hCommentEdit_;
-	int  commentDecoCount_;
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
