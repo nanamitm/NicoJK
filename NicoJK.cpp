@@ -25,6 +25,8 @@
 #include <dwrite_2.h>
 #include <Vsstyle.h>
 #include <richedit.h>
+#include <wrl/event.h>
+using Microsoft::WRL::Callback;
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -1904,7 +1906,6 @@ void CNicoJK::ShowNicoLoginWindow()
 
 void CNicoJK::ShowCommentWindow()
 {
-	LoadLibrary(TEXT("Msftedit.dll"));
 	if (!hCommentWindow_) {
 		RECT rc = {};
 		if (hForce_) GetWindowRect(hForce_, &rc);
@@ -1918,7 +1919,11 @@ void CNicoJK::ShowCommentWindow()
 		UpdateWindowTheme();
 		ShowWindow(hCommentWindow_, SW_SHOWNORMAL);
 		SetForegroundWindow(hCommentWindow_);
-		if (hCommentEdit_) SetFocus(hCommentEdit_);
+		if (pWV2Controller_ && wv2Ready_) {
+			pWV2Controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+		} else if (hCommentEdit_) {
+			SetFocus(hCommentEdit_);
+		}
 	}
 }
 
@@ -3190,6 +3195,42 @@ LRESULT CALLBACK CNicoJK::CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
 }
 
 
+static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
+{
+	std::wstring html =
+		L"<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><style>"
+		L"*{margin:0;padding:0;box-sizing:border-box}"
+		L"html,body{width:100%;height:100%;overflow:hidden;background:#ffffff}"
+		L"#c{display:block;width:100%;height:100%;border:none;outline:none;"
+		L"font-family:'Segoe UI Emoji','";
+	html += fontName;
+	wchar_t szSize[32];
+	swprintf_s(szSize, L"',sans-serif;font-size:%dpt;", fontSize);
+	html += szSize;
+	html +=
+		L"padding:2px 6px;background:transparent;color:#000000}"
+		L"</style></head><body>"
+		L"<input id=\"c\" type=\"text\" maxlength=\"75\">"
+		L"<script>"
+		L"var c=document.getElementById('c');"
+		L"c.addEventListener('keydown',function(e){"
+		L"  if(e.key==='Enter'&&!e.isComposing){"
+		L"    if(c.value)window.chrome.webview.postMessage(c.value);"
+		L"    e.preventDefault();"
+		L"  }"
+		L"});"
+		L"window.chrome.webview.addEventListener('message',function(e){"
+		L"  if(e.data==='clear'){c.value='';}"
+		L"  else if(e.data==='focus'){c.focus();}"
+		L"  else if(e.data.startsWith('theme:')){"
+		L"    var p=e.data.slice(6).split(',');"
+		L"    document.body.style.background=p[0];c.style.color=p[1];"
+		L"  }"
+		L"});"
+		L"</script></body></html>";
+	return html;
+}
+
 LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (uMsg == WM_CREATE) {
@@ -3197,15 +3238,6 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
 		if (!pThis) return 0;
 		pThis->hCommentWindow_ = hwnd;
-		// RichEdit (カラー絵文字対応)
-		pThis->hCommentEdit_ = CreateWindowEx(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, nullptr,
-		    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-		    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_COMMENT_EDIT), g_hinstDLL, nullptr);
-		if (pThis->hCommentEdit_) {
-			SendMessage(pThis->hCommentEdit_, EM_SETLIMITTEXT, POST_COMMENT_MAX - 1, 0);
-		
-			SetWindowSubclass(pThis->hCommentEdit_, CommentEditSubclassProc, 1, 0);
-		}
 		// 装飾ラジオボタン (mailDecorations から生成)
 		pThis->commentDecoCount_ = 0;
 		for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p && pThis->commentDecoCount_ < IDC_COMMENT_DECO_MAX; ) {
@@ -3234,21 +3266,100 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			SetWindowSubclass(hSend, LoginButtonSubclassProc, 1, reinterpret_cast<DWORD_PTR>(pThis));
 		}
 		HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-		if (pThis->hCommentEdit_) {
-			// CFM_FACE を指定しない: Meiryo UI 等のモノクロ絵文字グリフが優先されるのを防ぎ
-			// DirectWrite が Segoe UI Emoji へフォールバックしてカラー絵文字を描画する
-			CHARFORMAT2 cf = {};
-			cf.cbSize = sizeof(cf);
-			cf.dwMask = CFM_SIZE | CFM_CHARSET;
-			cf.bCharSet = DEFAULT_CHARSET;
-			cf.yHeight = pThis->s_.forceFontSize * 20;
-			SendMessage(pThis->hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
-		}
 		if (hSend) SendMessage(hSend, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 		for (int i = 0; i < pThis->commentDecoCount_; ++i) {
 			HWND h = GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i);
 			if (h) SendMessage(h, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 		}
+
+		// WebView2 非同期作成
+		// ユーザーデータフォルダ: NicoJK.ini と同じディレクトリに _webview2 サフィックスで作成
+		std::wstring udPath = pThis->iniFileName_;
+		size_t dot = udPath.rfind(L'.');
+		if (dot != std::wstring::npos) udPath = udPath.substr(0, dot);
+		udPath += L"_webview2";
+
+		HWND hwndCap = hwnd;
+		std::wstring html = BuildCommentInputHTML(pThis->s_.forceFontName, pThis->s_.forceFontSize);
+
+		CreateCoreWebView2EnvironmentWithOptions(nullptr, udPath.c_str(), nullptr,
+		    Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+		        [pThis, hwndCap, html](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+		            if (FAILED(hr) || !env || !IsWindow(hwndCap)) {
+		                // WebView2 利用不可: フォールバックとして plain EDIT コントロールを作成
+		                HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), nullptr,
+		                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+		                    0, 0, 0, 0, hwndCap,
+		                    reinterpret_cast<HMENU>(IDC_COMMENT_EDIT), g_hinstDLL, nullptr);
+		                if (hEdit) {
+		                    pThis->hCommentEdit_ = hEdit;
+		                    SendMessage(hEdit, EM_SETLIMITTEXT, POST_COMMENT_MAX - 1, 0);
+		                    SetWindowSubclass(hEdit, CommentEditSubclassProc, 1, 0);
+		                    HFONT hF = pThis->hForceFont_ ?
+		                        pThis->hForceFont_ :
+		                        reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+		                    SendMessage(hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hF), TRUE);
+		                    RECT rc; GetClientRect(hwndCap, &rc);
+		                    PostMessage(hwndCap, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+		                }
+		                return S_OK;
+		            }
+		            env->CreateCoreWebView2Controller(hwndCap,
+		                Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+		                    [pThis, hwndCap, html](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
+		                        if (FAILED(hr) || !ctrl || !IsWindow(hwndCap)) return S_OK;
+
+		                        pThis->pWV2Controller_ = ctrl;
+		                        ctrl->get_CoreWebView2(&pThis->pWV2_);
+
+		                        // コンテキストメニュー・ズーム・DevTools を無効化
+		                        Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
+		                        if (SUCCEEDED(pThis->pWV2_->get_Settings(&settings)) && settings) {
+		                            settings->put_AreDefaultContextMenusEnabled(FALSE);
+		                            settings->put_IsZoomControlEnabled(FALSE);
+		                            settings->put_AreDevToolsEnabled(FALSE);
+		                        }
+
+		                        // Enter キー入力 (JS → C++) の受信ハンドラ
+		                        pThis->pWV2_->add_WebMessageReceived(
+		                            Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+		                                [pThis, hwndCap](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+		                                    LPWSTR msg = nullptr;
+		                                    args->TryGetWebMessageAsString(&msg);
+		                                    if (msg && msg[0] && IsWindow(hwndCap)) {
+		                                        pThis->OnWV2CommentSend(hwndCap, msg);
+		                                    }
+		                                    CoTaskMemFree(msg);
+		                                    return S_OK;
+		                                }).Get(), &pThis->wv2MsgToken_);
+
+		                        // ページ読み込み完了後にサイズ・テーマ・フォーカスを適用
+		                        pThis->pWV2_->add_NavigationCompleted(
+		                            Callback<ICoreWebView2NavigationCompletedEventHandler>(
+		                                [pThis, hwndCap](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
+		                                    if (pThis->wv2Ready_) return S_OK; // 初回のみ
+		                                    pThis->wv2Ready_ = true;
+		                                    // テーマ適用
+		                                    pThis->ApplyWV2Theme();
+		                                    // コントロール配置
+		                                    RECT rc; GetClientRect(hwndCap, &rc);
+		                                    PostMessage(hwndCap, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+		                                    // 表示中なら入力欄にフォーカス
+		                                    if (IsWindowVisible(hwndCap) && pThis->pWV2Controller_) {
+		                                        pThis->pWV2Controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+		                                    }
+		                                    return S_OK;
+		                                }).Get(), nullptr);
+
+		                        // 初期サイズを仮設定（NavigationCompleted で正式適用）
+		                        RECT rcClient; GetClientRect(hwndCap, &rcClient);
+		                        ctrl->put_Bounds(rcClient);
+
+		                        pThis->pWV2_->NavigateToString(html.c_str());
+		                        return S_OK;
+		                    }).Get());
+		            return S_OK;
+		        }).Get());
 		return 0;
 	}
 
@@ -3267,9 +3378,13 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			int editH  = 22 * dpi / 96;
 			int btnW   = 64 * dpi / 96;
 			int btnH   = 24 * dpi / 96;
-			// 入力欄（単行・固定高さ）
-			MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_EDIT), margin, margin,
-			    rc.right - margin * 2, editH, TRUE);
+			// 入力欄
+			if (pThis->pWV2Controller_ && pThis->wv2Ready_) {
+				RECT wv2Rect = { margin, margin, rc.right - margin, margin + editH };
+				pThis->pWV2Controller_->put_Bounds(wv2Rect);
+			} else if (HWND hEdit = GetDlgItem(hwnd, IDC_COMMENT_EDIT)) {
+				MoveWindow(hEdit, margin, margin, rc.right - margin * 2, editH, TRUE);
+			}
 			// ラジオボタンと送信ボタンを下段に配置
 			int rowY = margin + editH + gap;
 			MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_SEND), rc.right - margin - btnW, rowY, btnW, btnH, TRUE);
@@ -3283,48 +3398,53 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		return 0;
 	case WM_COMMAND:
 		if (LOWORD(wParam) == IDC_COMMENT_SEND && pThis && pThis->hForce_) {
-			int len = GetWindowTextLength(pThis->hCommentEdit_);
-			if (len <= 0) break;
-			std::vector<TCHAR> text(len + 1);
-			GetWindowText(pThis->hCommentEdit_, text.data(), len + 1);
-			// 選択中の装飾プレフィックスを取得
-			int decoIdx = 0;
-			for (int i = 0; i < pThis->commentDecoCount_; ++i) {
-				if (IsDlgButtonChecked(hwnd, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
-					decoIdx = i;
-					break;
+			if (pThis->pWV2_ && pThis->wv2Ready_) {
+				// JS 側で入力値を postMessage → WebMessageReceived → OnWV2CommentSend
+				pThis->pWV2_->ExecuteScript(
+				    L"(function(){var v=document.getElementById('c').value;if(v)window.chrome.webview.postMessage(v);})();",
+				    nullptr);
+			} else if (pThis->hCommentEdit_) {
+				int len = GetWindowTextLength(pThis->hCommentEdit_);
+				if (len <= 0) break;
+				std::vector<TCHAR> text(len + 1);
+				GetWindowText(pThis->hCommentEdit_, text.data(), len + 1);
+				int decoIdx = 0;
+				for (int i = 0; i < pThis->commentDecoCount_; ++i) {
+					if (IsDlgButtonChecked(hwnd, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
+						decoIdx = i; break;
+					}
 				}
-			}
-			TCHAR deco[64] = {};
-			int idx = 0;
-			for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p; ) {
-				size_t slen = _tcscspn(p, TEXT(":"));
-				if (idx == decoIdx) {
-					_tcsncpy_s(deco, p, min<size_t>(slen, 63));
-					break;
+				TCHAR deco[64] = {};
+				int idx = 0;
+				for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p; ) {
+					size_t slen = _tcscspn(p, TEXT(":"));
+					if (idx == decoIdx) { _tcsncpy_s(deco, p, min<size_t>(slen, 63)); break; }
+					++idx;
+					p += p[slen] ? slen + 1 : slen;
 				}
-				++idx;
-				p += p[slen] ? slen + 1 : slen;
+				TCHAR full[POST_COMMENT_MAX + 64];
+				_stprintf_s(full, TEXT("%s%s"), deco, text.data());
+				SetDlgItemText(pThis->hForce_, IDC_CB_POST, full);
+				SendMessage(pThis->hForce_, WM_POST_COMMENT, 0, 0);
+				SetWindowText(pThis->hCommentEdit_, TEXT(""));
 			}
-			TCHAR full[POST_COMMENT_MAX + 64];
-			_stprintf_s(full, TEXT("%s%s"), deco, text.data());
-			SetDlgItemText(pThis->hForce_, IDC_CB_POST, full);
-			SendMessage(pThis->hForce_, WM_POST_COMMENT, 0, 0);
-			SetWindowText(pThis->hCommentEdit_, TEXT(""));
 		}
 		break;
 	case WM_CLOSE:
 		ShowWindow(hwnd, SW_HIDE);
 		return 0;
 	case WM_SHOWWINDOW:
-		// RichEdit のカラーをダークモードに合わせて設定
-		if (wParam && pThis && pThis->hCommentEdit_) {
+		if (wParam && pThis) {
 			if (!pThis->panelColor_.GetPanelBackBrush()) {
 				pThis->panelColor_.SetColor(pThis->m_pApp);
 			}
-			SendMessage(pThis->hCommentEdit_, EM_SETBKGNDCOLOR,
-			    pThis->panelColor_.IsDark() ? 0 : 1,
-			    pThis->panelColor_.GetPanelBack());
+			if (pThis->hCommentEdit_) {
+				SendMessage(pThis->hCommentEdit_, EM_SETBKGNDCOLOR,
+				    pThis->panelColor_.IsDark() ? 0 : 1,
+				    pThis->panelColor_.GetPanelBack());
+			} else if (pThis->pWV2_ && pThis->wv2Ready_) {
+				pThis->ApplyWV2Theme();
+			}
 		}
 		break;
 	case WM_ERASEBKGND:
@@ -3405,12 +3525,58 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		}
 	case WM_DESTROY:
 		if (pThis) {
+			if (pThis->pWV2_) {
+				pThis->pWV2_->remove_WebMessageReceived(pThis->wv2MsgToken_);
+			}
+			if (pThis->pWV2Controller_) {
+				pThis->pWV2Controller_->Close();
+			}
+			pThis->pWV2_.Reset();
+			pThis->pWV2Controller_.Reset();
+			pThis->wv2Ready_ = false;
 			pThis->hCommentWindow_ = nullptr;
 			pThis->hCommentEdit_ = nullptr;
 		}
 		break;
 	}
 	return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+void CNicoJK::OnWV2CommentSend(HWND hwndComment, LPCWSTR text)
+{
+	if (!text || !text[0] || !hForce_) return;
+	int decoIdx = 0;
+	for (int i = 0; i < commentDecoCount_; ++i) {
+		if (IsDlgButtonChecked(hwndComment, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
+			decoIdx = i; break;
+		}
+	}
+	TCHAR deco[64] = {};
+	int idx = 0;
+	for (LPCTSTR p = s_.mailDecorations.c_str(); *p; ) {
+		size_t slen = _tcscspn(p, TEXT(":"));
+		if (idx == decoIdx) { _tcsncpy_s(deco, p, min<size_t>(slen, 63)); break; }
+		++idx;
+		p += p[slen] ? slen + 1 : slen;
+	}
+	TCHAR full[POST_COMMENT_MAX + 64];
+	_stprintf_s(full, TEXT("%s%s"), deco, text);
+	SetDlgItemText(hForce_, IDC_CB_POST, full);
+	SendMessage(hForce_, WM_POST_COMMENT, 0, 0);
+	if (pWV2_) pWV2_->PostWebMessageAsString(L"clear");
+}
+
+void CNicoJK::ApplyWV2Theme()
+{
+	if (!pWV2_ || !wv2Ready_) return;
+	if (!panelColor_.GetPanelBackBrush()) return;
+	COLORREF back = panelColor_.GetPanelBack();
+	COLORREF text = panelColor_.GetPanelText();
+	wchar_t msg[64];
+	swprintf_s(msg, L"theme:#%02X%02X%02X,#%02X%02X%02X",
+	    GetRValue(back), GetGValue(back), GetBValue(back),
+	    GetRValue(text), GetGValue(text), GetBValue(text));
+	pWV2_->PostWebMessageAsString(msg);
 }
 
 bool CNicoJK::CreateForceWindowItems(HWND hwnd)
@@ -3653,6 +3819,8 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 				cf.dwEffects = CFE_AUTOCOLOR;
 				SendMessage(hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
 			}
+		} else {
+			ApplyWV2Theme();
 		}
 		InvalidateRect(hCommentWindow_, nullptr, TRUE);
 	}

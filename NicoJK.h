@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <thread>
+#include <WebView2.h>
+#include <wrl/client.h>
 
 // パネルカラーリソース管理クラス
 class CNicoJKPanelColor
@@ -205,6 +207,8 @@ private:
 	void ShowCommentWindow();
 	static LRESULT CALLBACK CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+	void OnWV2CommentSend(HWND hwndComment, LPCWSTR text);
+	void ApplyWV2Theme();
 	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
 	void RequestJkcnslLoginSettings();
 	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
@@ -248,6 +252,10 @@ private:
 	HWND hCommentWindow_;
 	HWND hCommentEdit_;
 	int  commentDecoCount_;
+	Microsoft::WRL::ComPtr<ICoreWebView2Controller> pWV2Controller_;
+	Microsoft::WRL::ComPtr<ICoreWebView2>           pWV2_;
+	EventRegistrationToken                          wv2MsgToken_ = {};
+	bool                                            wv2Ready_    = false;
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
