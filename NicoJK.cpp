@@ -1912,7 +1912,7 @@ void CNicoJK::ShowCommentWindow()
 		int y = rc.top  ? rc.top  + 16 : CW_USEDEFAULT;
 		hCommentWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.commentpost"), TEXT("NicoJK - コメント投稿"),
 		                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
-		                                 x, y, 440, 180, hForce_, nullptr, g_hinstDLL, this);
+		                                 x, y, 440, 90, hForce_, nullptr, g_hinstDLL, this);
 	}
 	if (hCommentWindow_) {
 		UpdateWindowTheme();
@@ -3179,7 +3179,7 @@ LRESULT CALLBACK CNicoJK::LoginButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
 
 LRESULT CALLBACK CNicoJK::CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
-	if (uMsg == WM_KEYDOWN && wParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000)) {
+	if (uMsg == WM_KEYDOWN && wParam == VK_RETURN) {
 		SendMessage(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(IDC_COMMENT_SEND, BN_CLICKED), 0);
 		return 0;
 	}
@@ -3189,6 +3189,7 @@ LRESULT CALLBACK CNicoJK::CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
 	return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
+
 LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (uMsg == WM_CREATE) {
@@ -3197,11 +3198,12 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		if (!pThis) return 0;
 		pThis->hCommentWindow_ = hwnd;
 		// RichEdit (カラー絵文字対応)
-		pThis->hCommentEdit_ = CreateWindowEx(0, TEXT("RichEdit50W"), nullptr,
-		    WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL,
+		pThis->hCommentEdit_ = CreateWindowEx(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, nullptr,
+		    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
 		    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_COMMENT_EDIT), g_hinstDLL, nullptr);
 		if (pThis->hCommentEdit_) {
 			SendMessage(pThis->hCommentEdit_, EM_SETLIMITTEXT, POST_COMMENT_MAX - 1, 0);
+		
 			SetWindowSubclass(pThis->hCommentEdit_, CommentEditSubclassProc, 1, 0);
 		}
 		// 装飾ラジオボタン (mailDecorations から生成)
@@ -3232,7 +3234,16 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			SetWindowSubclass(hSend, LoginButtonSubclassProc, 1, reinterpret_cast<DWORD_PTR>(pThis));
 		}
 		HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-		if (pThis->hCommentEdit_) SendMessage(pThis->hCommentEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
+		if (pThis->hCommentEdit_) {
+			// CFM_FACE を指定しない: Meiryo UI 等のモノクロ絵文字グリフが優先されるのを防ぎ
+			// DirectWrite が Segoe UI Emoji へフォールバックしてカラー絵文字を描画する
+			CHARFORMAT2 cf = {};
+			cf.cbSize = sizeof(cf);
+			cf.dwMask = CFM_SIZE | CFM_CHARSET;
+			cf.bCharSet = DEFAULT_CHARSET;
+			cf.yHeight = pThis->s_.forceFontSize * 20;
+			SendMessage(pThis->hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+		}
 		if (hSend) SendMessage(hSend, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 		for (int i = 0; i < pThis->commentDecoCount_; ++i) {
 			HWND h = GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i);
@@ -3253,9 +3264,14 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			int margin = 8 * dpi / 96;
 			int gap    = 4 * dpi / 96;
 			int radioH = 20 * dpi / 96;
+			int editH  = 22 * dpi / 96;
 			int btnW   = 64 * dpi / 96;
 			int btnH   = 24 * dpi / 96;
-			int rowY   = static_cast<int>(rc.bottom) - margin - btnH;
+			// 入力欄（単行・固定高さ）
+			MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_EDIT), margin, margin,
+			    rc.right - margin * 2, editH, TRUE);
+			// ラジオボタンと送信ボタンを下段に配置
+			int rowY = margin + editH + gap;
 			MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_SEND), rc.right - margin - btnW, rowY, btnW, btnH, TRUE);
 			int radioAreaW = rc.right - margin - btnW - gap - margin;
 			int radioW = pThis->commentDecoCount_ > 0 ? radioAreaW / pThis->commentDecoCount_ : radioAreaW;
@@ -3263,9 +3279,6 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 				MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i),
 				    margin + i * radioW, rowY + (btnH - radioH) / 2, radioW, radioH, TRUE);
 			}
-			int editH = rowY - margin - gap;
-			MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_EDIT), margin, margin,
-			    rc.right - margin * 2, max(editH, 20), TRUE);
 		}
 		return 0;
 	case WM_COMMAND:
@@ -3622,7 +3635,8 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		SetWindowTheme(hCommentWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
 		for (int i = 0; i < commentDecoCount_; ++i) {
 			HWND h = GetDlgItem(hCommentWindow_, IDC_COMMENT_DECO_FIRST + i);
-			if (h) SetWindowTheme(h, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
+			// Visual Styles を外してGDI描画にすることでWM_CTLCOLORBTNのテキスト色を有効にする
+			if (h) SetWindowTheme(h, L"", L"");
 		}
 		if (hCommentEdit_) {
 			SendMessage(hCommentEdit_, EM_SETBKGNDCOLOR, bDark ? 0 : 1, panelColor_.GetPanelBack());
