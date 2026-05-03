@@ -657,6 +657,12 @@ bool CNicoJK::Finalize()
 
 bool CNicoJK::TogglePlugin(bool bEnabled)
 {
+	{
+		TCHAR dbg[128];
+		_stprintf_s(dbg, TEXT("NicoJK: TogglePlugin(%d) bUsePanel=%d hPanel_=%p hForce_=%p"),
+		    bEnabled, s_.bUsePanel, hPanel_, hForce_);
+		m_pApp->AddLog(dbg);
+	}
 	if (bEnabled) {
 		if ((!s_.bUsePanel || hPanel_) && !hForce_) {
 			LoadFromIni();
