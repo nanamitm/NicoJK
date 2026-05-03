@@ -3177,7 +3177,11 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	    CreateWindowEx(0, TEXT("BUTTON"), TEXT(""), WS_CHILD | WS_VISIBLE,
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPACITY_UP), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("P"), WS_CHILD | WS_VISIBLE,
-	        left + buttonWidth, hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_POPUP), g_hinstDLL, nullptr) &&
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_POPUP), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("L"), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_LOGIN), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("?"), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
 	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS | CBS_OWNERDRAWFIXED,
@@ -3192,6 +3196,8 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 			SendDlgItemMessage(hwnd, IDC_BUTTON_OPACITY_UP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_OPACITY_TOGGLE, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_POPUP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
+			SendDlgItemMessage(hwnd, IDC_BUTTON_LOGIN, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
+			SendDlgItemMessage(hwnd, IDC_BUTTON_HELP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_FORCELIST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_CB_POST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 		}
@@ -3217,6 +3223,8 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 		addToolTip(IDC_CHECK_RELATIVE, TEXT("読み込むログを現在の再生位置に合わせる"));
 		addToolTip(IDC_BUTTON_OPACITY_TOGGLE, TEXT("透明度を切り替える"));
 		addToolTip(IDC_BUTTON_POPUP, TEXT("ポップアップ表示を切り替える"));
+		addToolTip(IDC_BUTTON_LOGIN, TEXT("ニコニコログイン"));
+		addToolTip(IDC_BUTTON_HELP, TEXT("ローカルコマンドヘルプ"));
 		return true;
 	}
 	return false;
@@ -3436,6 +3444,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_UP), m_pApp, TVTestPanelButtonProc);
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_TOGGLE), m_pApp, TVTestPanelButtonProc);
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_POPUP), m_pApp, TVTestPanelButtonProc);
+				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_LOGIN), m_pApp, TVTestPanelButtonProc);
+				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_HELP), m_pApp, TVTestPanelButtonProc);
 			}
 
 			if (s_.commentShareMode == 1 || s_.commentShareMode == 2 || s_.bCheckProcessRecording) {
@@ -3492,6 +3502,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_UP));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_TOGGLE));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_POPUP));
+				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_LOGIN));
+				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_HELP));
 			}
 			if (hForceTooltip_) {
 				DestroyWindow(hForceTooltip_);
@@ -4097,6 +4109,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			break;
 		case IDC_BUTTON_POPUP:
 			TogglePanelPopup();
+			break;
+		case IDC_BUTTON_LOGIN:
+			ShowNicoLoginWindow();
+			break;
+		case IDC_BUTTON_HELP:
+			ShowLocalCommandHelp();
 			break;
 		}
 		break;
@@ -4819,6 +4837,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_UP), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_OPACITY_TOGGLE), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_POPUP), swShow);
+					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_LOGIN), swShow);
+					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_HELP), swShow);
 				}
 			}
 			SetWindowPos(hItem, nullptr, 0, 0, rcParent.right-rc.left*2, rcParent.bottom-rc.top-padding, SWP_NOMOVE | SWP_NOZORDER);
