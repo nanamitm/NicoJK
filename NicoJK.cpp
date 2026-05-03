@@ -3434,38 +3434,36 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	int height = 24 * dpi / 96;
 	int left = 0;
 
-	auto chk = [&](HWND h, LPCTSTR name) -> bool {
-		if (!h) { m_pApp->AddLog((tstring(TEXT("NicoJK: CreateForceWindowItems 失敗: ")) + name).c_str(), TVTest::LOG_TYPE_ERROR); }
-		return h != nullptr;
-	};
-	if (chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("勢い"), WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
-	        (left += padding), padding, tabWidth, height, hwnd, reinterpret_cast<HMENU>(IDC_RADIO_FORCE), g_hinstDLL, nullptr), TEXT("IDC_RADIO_FORCE")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("ログ"), WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
-	        (left += tabWidth), padding, tabWidth, height, hwnd, reinterpret_cast<HMENU>(IDC_RADIO_LOG), g_hinstDLL, nullptr), TEXT("IDC_RADIO_LOG")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("File"), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-	        (left += tabWidth + space), padding + space, checkBoxWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_CHECK_SPECFILE), g_hinstDLL, nullptr), TEXT("IDC_CHECK_SPECFILE")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("Rel"), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-	        (left += checkBoxWidth), padding + space, checkBoxWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_CHECK_RELATIVE), g_hinstDLL, nullptr), TEXT("IDC_CHECK_RELATIVE")) &&
-	    chk(CreateWindowEx(0, TRACKBAR_CLASS, TEXT("不透明度"), WS_CHILD | WS_VISIBLE | TBS_BOTH | TBS_NOTICKS | TBS_TOOLTIPS,
-	        left + checkBoxWidth, hPanel_ ? -height : padding + space, sliderWidth, height - space, hwnd, reinterpret_cast<HMENU>(IDC_SLIDER_OPACITY), g_hinstDLL, nullptr), TEXT("IDC_SLIDER_OPACITY")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT(""), WS_CHILD | WS_VISIBLE,
-	        (left += checkBoxWidth + space), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPACITY_DOWN), g_hinstDLL, nullptr), TEXT("IDC_BUTTON_OPACITY_DOWN")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT(""), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPACITY_TOGGLE), g_hinstDLL, nullptr), TEXT("IDC_BUTTON_OPACITY_TOGGLE")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT(""), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPACITY_UP), g_hinstDLL, nullptr), TEXT("IDC_BUTTON_OPACITY_UP")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("P"), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_POPUP), g_hinstDLL, nullptr), TEXT("IDC_BUTTON_POPUP")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("L"), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_LOGIN), g_hinstDLL, nullptr), TEXT("IDC_BUTTON_LOGIN")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("?"), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr), TEXT("IDC_BUTTON_HELP")) &&
-	    chk(CreateWindowEx(0, TEXT("BUTTON"), TEXT("C"), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_COMMENT), g_hinstDLL, nullptr), TEXT("IDC_BUTTON_COMMENT")) &&
-	    chk(CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
-	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr), TEXT("IDC_FORCELIST")) &&
-	    chk(CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS | CBS_OWNERDRAWFIXED,
-	        padding, padding + height + 100, 100, 50, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr), TEXT("IDC_CB_POST")))
+	if (CreateWindowEx(0, TEXT("BUTTON"), TEXT("勢い"), WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
+	        (left += padding), padding, tabWidth, height, hwnd, reinterpret_cast<HMENU>(IDC_RADIO_FORCE), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("ログ"), WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
+	        (left += tabWidth), padding, tabWidth, height, hwnd, reinterpret_cast<HMENU>(IDC_RADIO_LOG), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("File"), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+	        (left += tabWidth + space), padding + space, checkBoxWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_CHECK_SPECFILE), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("Rel"), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+	        (left += checkBoxWidth), padding + space, checkBoxWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_CHECK_RELATIVE), g_hinstDLL, nullptr) &&
+	    // パネルでは枠外の高さに置くことで実質的に非表示にする
+	    CreateWindowEx(0, TRACKBAR_CLASS, TEXT("不透明度"), WS_CHILD | WS_VISIBLE | TBS_BOTH | TBS_NOTICKS | TBS_TOOLTIPS,
+	        left + checkBoxWidth, hPanel_ ? -height : padding + space, sliderWidth, height - space, hwnd, reinterpret_cast<HMENU>(IDC_SLIDER_OPACITY), g_hinstDLL, nullptr) &&
+	    // パネルでは(描画がとても面倒なので)スライダーをボタン3つで代用
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT(""), WS_CHILD | WS_VISIBLE,
+	        (left += checkBoxWidth + space), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPACITY_DOWN), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT(""), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPACITY_TOGGLE), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT(""), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPACITY_UP), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("P"), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_POPUP), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("L"), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_LOGIN), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("?"), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("C"), WS_CHILD | WS_VISIBLE,
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_COMMENT), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
+	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
+	    CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS | CBS_OWNERDRAWFIXED,
+	        padding, padding + height + 100, 100, 50, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr))
 	{
 		if (hForceFont_) {
 			SendDlgItemMessage(hwnd, IDC_RADIO_FORCE, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
