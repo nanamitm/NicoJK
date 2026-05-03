@@ -1911,9 +1911,18 @@ void CNicoJK::ShowCommentWindow()
 		if (hForce_) GetWindowRect(hForce_, &rc);
 		int x = rc.left ? rc.left + 16 : CW_USEDEFAULT;
 		int y = rc.top  ? rc.top  + 16 : CW_USEDEFAULT;
+		// 縦サイズを DPI から計算（WM_SIZING でも固定するが初期値も正確にする）
+		int dpi = m_pApp ? m_pApp->GetSystemDPI() : 96;
+		if (dpi == 0) dpi = 96;
+		int margin = 8 * dpi / 96, gap = 4 * dpi / 96;
+		int editH  = 22 * dpi / 96, radioH = 20 * dpi / 96;
+		int clientH = margin + editH + gap + radioH + margin;
+		RECT rcAdj = { 0, 0, 440, clientH };
+		AdjustWindowRectEx(&rcAdj, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX, FALSE, WS_EX_TOOLWINDOW);
 		hCommentWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.commentpost"), TEXT("NicoJK - コメント投稿"),
 		                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
-		                                 x, y, 440, 90, hForce_, nullptr, g_hinstDLL, this);
+		                                 x, y, rcAdj.right - rcAdj.left, rcAdj.bottom - rcAdj.top,
+		                                 hForce_, nullptr, g_hinstDLL, this);
 	}
 	if (hCommentWindow_) {
 		UpdateWindowTheme();
@@ -3238,15 +3247,21 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
 		if (!pThis) return 0;
 		pThis->hCommentWindow_ = hwnd;
-		// 装飾ラジオボタン (mailDecorations から生成)
+		// 装飾ラジオボタン (mailDecorations から生成、空エントリは "なし" として重複除外)
 		pThis->commentDecoCount_ = 0;
+		int noneIdx = -1;
+		bool noneCreated = false;
 		for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p && pThis->commentDecoCount_ < IDC_COMMENT_DECO_MAX; ) {
 			size_t len = _tcscspn(p, TEXT(":"));
 			TCHAR label[64];
 			if (len == 0) {
+				if (noneCreated) { p += p[len] ? len + 1 : len; continue; } // 重複 "なし" をスキップ
 				_tcscpy_s(label, TEXT("なし"));
+				noneIdx = pThis->commentDecoCount_;
+				noneCreated = true;
 			} else {
 				_tcsncpy_s(label, p, min<size_t>(len, 63));
+				label[min<size_t>(len, 63)] = TEXT('\0');
 			}
 			DWORD style = WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON;
 			if (pThis->commentDecoCount_ == 0) style |= WS_GROUP;
@@ -3257,16 +3272,9 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			++pThis->commentDecoCount_;
 			p += p[len] ? len + 1 : len;
 		}
-		CheckDlgButton(hwnd, IDC_COMMENT_DECO_FIRST, BST_CHECKED);
-		// 送信ボタン (BS_OWNERDRAW、LoginButtonSubclassProc 共用)
-		HWND hSend = CreateWindowEx(0, TEXT("BUTTON"), TEXT("送信"),
-		    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-		    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_COMMENT_SEND), g_hinstDLL, nullptr);
-		if (hSend) {
-			SetWindowSubclass(hSend, LoginButtonSubclassProc, 1, reinterpret_cast<DWORD_PTR>(pThis));
-		}
+		// デフォルトは "なし"（空エントリ）。なければ先頭を選択
+		CheckDlgButton(hwnd, IDC_COMMENT_DECO_FIRST + (noneIdx >= 0 ? noneIdx : 0), BST_CHECKED);
 		HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-		if (hSend) SendMessage(hSend, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 		for (int i = 0; i < pThis->commentDecoCount_; ++i) {
 			HWND h = GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i);
 			if (h) SendMessage(h, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
@@ -3376,8 +3384,6 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			int gap    = 4 * dpi / 96;
 			int radioH = 20 * dpi / 96;
 			int editH  = 22 * dpi / 96;
-			int btnW   = 64 * dpi / 96;
-			int btnH   = 24 * dpi / 96;
 			// 入力欄
 			if (pThis->pWV2Controller_ && pThis->wv2Ready_) {
 				RECT wv2Rect = { margin, margin, rc.right - margin, margin + editH };
@@ -3385,49 +3391,42 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			} else if (HWND hEdit = GetDlgItem(hwnd, IDC_COMMENT_EDIT)) {
 				MoveWindow(hEdit, margin, margin, rc.right - margin * 2, editH, TRUE);
 			}
-			// ラジオボタンと送信ボタンを下段に配置
+			// ラジオボタンを下段に全幅配置
 			int rowY = margin + editH + gap;
-			MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_SEND), rc.right - margin - btnW, rowY, btnW, btnH, TRUE);
-			int radioAreaW = rc.right - margin - btnW - gap - margin;
+			int radioAreaW = rc.right - margin * 2;
 			int radioW = pThis->commentDecoCount_ > 0 ? radioAreaW / pThis->commentDecoCount_ : radioAreaW;
 			for (int i = 0; i < pThis->commentDecoCount_; ++i) {
 				MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i),
-				    margin + i * radioW, rowY + (btnH - radioH) / 2, radioW, radioH, TRUE);
+				    margin + i * radioW, rowY, radioW, radioH, TRUE);
 			}
 		}
 		return 0;
 	case WM_COMMAND:
-		if (LOWORD(wParam) == IDC_COMMENT_SEND && pThis && pThis->hForce_) {
-			if (pThis->pWV2_ && pThis->wv2Ready_) {
-				// JS 側で入力値を postMessage → WebMessageReceived → OnWV2CommentSend
-				pThis->pWV2_->ExecuteScript(
-				    L"(function(){var v=document.getElementById('c').value;if(v)window.chrome.webview.postMessage(v);})();",
-				    nullptr);
-			} else if (pThis->hCommentEdit_) {
-				int len = GetWindowTextLength(pThis->hCommentEdit_);
-				if (len <= 0) break;
-				std::vector<TCHAR> text(len + 1);
-				GetWindowText(pThis->hCommentEdit_, text.data(), len + 1);
-				int decoIdx = 0;
-				for (int i = 0; i < pThis->commentDecoCount_; ++i) {
-					if (IsDlgButtonChecked(hwnd, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
-						decoIdx = i; break;
-					}
+		// IDC_COMMENT_SEND は フォールバック EDIT の Enter キー (CommentEditSubclassProc) から送られる
+		if (LOWORD(wParam) == IDC_COMMENT_SEND && pThis && pThis->hForce_ && pThis->hCommentEdit_) {
+			int len = GetWindowTextLength(pThis->hCommentEdit_);
+			if (len <= 0) break;
+			std::vector<TCHAR> text(len + 1);
+			GetWindowText(pThis->hCommentEdit_, text.data(), len + 1);
+			int decoIdx = 0;
+			for (int i = 0; i < pThis->commentDecoCount_; ++i) {
+				if (IsDlgButtonChecked(hwnd, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
+					decoIdx = i; break;
 				}
-				TCHAR deco[64] = {};
-				int idx = 0;
-				for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p; ) {
-					size_t slen = _tcscspn(p, TEXT(":"));
-					if (idx == decoIdx) { _tcsncpy_s(deco, p, min<size_t>(slen, 63)); break; }
-					++idx;
-					p += p[slen] ? slen + 1 : slen;
-				}
-				TCHAR full[POST_COMMENT_MAX + 64];
-				_stprintf_s(full, TEXT("%s%s"), deco, text.data());
-				SetDlgItemText(pThis->hForce_, IDC_CB_POST, full);
-				SendMessage(pThis->hForce_, WM_POST_COMMENT, 0, 0);
-				SetWindowText(pThis->hCommentEdit_, TEXT(""));
 			}
+			TCHAR deco[64] = {};
+			int idx = 0;
+			for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p; ) {
+				size_t slen = _tcscspn(p, TEXT(":"));
+				if (idx == decoIdx) { _tcsncpy_s(deco, p, min<size_t>(slen, 63)); break; }
+				++idx;
+				p += p[slen] ? slen + 1 : slen;
+			}
+			TCHAR full[POST_COMMENT_MAX + 64];
+			_stprintf_s(full, TEXT("%s%s"), deco, text.data());
+			SetDlgItemText(pThis->hForce_, IDC_CB_POST, full);
+			SendMessage(pThis->hForce_, WM_POST_COMMENT, 0, 0);
+			SetWindowText(pThis->hCommentEdit_, TEXT(""));
 		}
 		break;
 	case WM_CLOSE:
@@ -3469,60 +3468,28 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			return reinterpret_cast<LRESULT>(pThis->panelColor_.GetPanelBackBrush());
 		}
 		break;
-	case WM_DRAWITEM:
-		{
-			DRAWITEMSTRUCT *dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-			if (dis->CtlType != ODT_BUTTON || !pThis) break;
-			if (!pThis->panelColor_.GetPanelBackBrush()) {
-				pThis->panelColor_.SetColor(pThis->m_pApp);
-			}
-			bool bDisabled = (dis->itemState & ODS_DISABLED) != 0;
-			bool bPressed  = (dis->itemState & ODS_SELECTED) != 0;
-			bool bHot      = !bDisabled && GetProp(dis->hwndItem, TEXT("Hot")) != nullptr;
-			if (pThis->panelColor_.IsDark()) {
-				COLORREF crBase = pThis->panelColor_.GetPanelBack();
-				auto ch = [](int v) -> BYTE { return static_cast<BYTE>(v < 0 ? 0 : v > 255 ? 255 : v); };
-				auto brighter = [&ch](COLORREF cr, int n) {
-					return RGB(ch(GetRValue(cr) + n), ch(GetGValue(cr) + n), ch(GetBValue(cr) + n));
-				};
-				COLORREF crBg     = bDisabled ? crBase : bPressed ? brighter(crBase, 10) : bHot ? brighter(crBase, 30) : brighter(crBase, 18);
-				COLORREF crBorder = brighter(crBase, 50);
-				COLORREF crText   = bDisabled ? brighter(crBase, 40) : pThis->panelColor_.GetPanelText();
-				HBRUSH hBrush = CreateSolidBrush(crBg);
-				FillRect(dis->hDC, &dis->rcItem, hBrush);
-				DeleteObject(hBrush);
-				HPEN hPen = CreatePen(PS_SOLID, 1, crBorder);
-				HPEN hOldPen = reinterpret_cast<HPEN>(SelectObject(dis->hDC, hPen));
-				HBRUSH hOldBrush = reinterpret_cast<HBRUSH>(SelectObject(dis->hDC, GetStockObject(NULL_BRUSH)));
-				Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
-				SelectObject(dis->hDC, hOldPen);
-				SelectObject(dis->hDC, hOldBrush);
-				DeleteObject(hPen);
-				TCHAR szText[64];
-				GetWindowText(dis->hwndItem, szText, _countof(szText));
-				SetTextColor(dis->hDC, crText);
-				SetBkMode(dis->hDC, TRANSPARENT);
-				HFONT hFont = reinterpret_cast<HFONT>(SendMessage(dis->hwndItem, WM_GETFONT, 0, 0));
-				HFONT hOldFont = hFont ? reinterpret_cast<HFONT>(SelectObject(dis->hDC, hFont)) : nullptr;
-				DrawText(dis->hDC, szText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-				if (hOldFont) SelectObject(dis->hDC, hOldFont);
-				return TRUE;
-			}
-			HTHEME hTheme = OpenThemeData(dis->hwndItem, L"BUTTON");
-			if (hTheme) {
-				int iStateId = PBS_NORMAL;
-				if (bDisabled)     iStateId = PBS_DISABLED;
-				else if (bPressed) iStateId = PBS_PRESSED;
-				else if (bHot)     iStateId = PBS_HOT;
-				TCHAR szText[64];
-				GetWindowText(dis->hwndItem, szText, _countof(szText));
-				DrawThemeBackground(hTheme, dis->hDC, BP_PUSHBUTTON, iStateId, &dis->rcItem, nullptr);
-				DrawThemeText(hTheme, dis->hDC, BP_PUSHBUTTON, iStateId, szText, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE, 0, &dis->rcItem);
-				CloseThemeData(hTheme);
-				return TRUE;
-			}
-			break;
+	case WM_SIZING:
+		// 縦サイズを固定：ドラッグ中に高さを補正
+		if (pThis) {
+			RECT *pr = reinterpret_cast<RECT*>(lParam);
+			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
+			if (dpi == 0) dpi = 96;
+			int margin = 8 * dpi / 96;
+			int gap    = 4 * dpi / 96;
+			int editH  = 22 * dpi / 96;
+			int radioH = 20 * dpi / 96;
+			int clientH = margin + editH + gap + radioH + margin;
+			RECT rcAdj = { 0, 0, 0, clientH };
+			AdjustWindowRectEx(&rcAdj, static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_STYLE)), FALSE,
+			    static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_EXSTYLE)));
+			int fixedH = rcAdj.bottom - rcAdj.top;
+			if (wParam == WMSZ_TOP || wParam == WMSZ_TOPLEFT || wParam == WMSZ_TOPRIGHT)
+				pr->top = pr->bottom - fixedH;
+			else
+				pr->bottom = pr->top + fixedH;
+			return TRUE;
 		}
+		break;
 	case WM_DESTROY:
 		if (pThis) {
 			if (pThis->pWV2_) {
