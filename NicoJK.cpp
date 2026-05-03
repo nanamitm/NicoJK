@@ -2240,6 +2240,7 @@ void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 			bPostToRefuge_ = !bPostToRefuge_;
 			bPostToRefugeInverted_ = false;
 			InvalidateRect(hForce_, nullptr, FALSE);
+			ApplyWV2Theme();
 		}
 		TCHAR text[64];
 		_stprintf_s(text, TEXT("現在の投稿先は%sです。"),
@@ -3537,8 +3538,20 @@ void CNicoJK::ApplyWV2Theme()
 {
 	if (!pWV2_ || !wv2Ready_) return;
 	if (!panelColor_.GetPanelBackBrush()) return;
-	COLORREF back = panelColor_.GetPanelBack();
-	COLORREF text = panelColor_.GetPanelText();
+	COLORREF back, text;
+	if (s_.bRefugeMixing) {
+		COLORREF cr = bPostToRefuge_ ? s_.crRefugeEditBox : s_.crNicoEditBox;
+		if (cr != RGB(0xFF, 0xFF, 0xFF)) {
+			back = cr;
+			text = GetBrightness(cr) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
+		} else {
+			back = panelColor_.GetPanelBack();
+			text = panelColor_.GetPanelText();
+		}
+	} else {
+		back = panelColor_.GetPanelBack();
+		text = panelColor_.GetPanelText();
+	}
 	wchar_t msg[64];
 	swprintf_s(msg, L"theme:#%02X%02X%02X,#%02X%02X%02X",
 	    GetRValue(back), GetGValue(back), GetBValue(back),
@@ -4636,12 +4649,14 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 								bPostToRefuge_ = !bPostToRefuge_;
 								bPostToRefugeInverted_ = false;
 								InvalidateRect(hwnd, nullptr, FALSE);
+								ApplyWV2Theme();
 							}
 							if (!bMix && !bPostToRefuge_) {
 								// 一時的に投稿先を変える
 								bPostToRefuge_ = true;
 								bPostToRefugeInverted_ = true;
 								InvalidateRect(hwnd, nullptr, FALSE);
+								ApplyWV2Theme();
 							}
 							// 過去のコメントの出力状態をリセット
 							bNicoReceivingPastChat_ = false;
@@ -4661,12 +4676,14 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 								bPostToRefuge_ = !bPostToRefuge_;
 								bPostToRefugeInverted_ = false;
 								InvalidateRect(hwnd, nullptr, FALSE);
+								ApplyWV2Theme();
 							}
 							if (bPostToRefuge_) {
 								// 一時的に投稿先を変える
 								bPostToRefuge_ = false;
 								bPostToRefugeInverted_ = true;
 								InvalidateRect(hwnd, nullptr, FALSE);
+								ApplyWV2Theme();
 							}
 							// 過去のコメントの出力状態をリセット
 							bNicoReceivingPastChat_ = false;
@@ -5054,6 +5071,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					bPostToRefuge_ = !bPostToRefuge_;
 					bPostToRefugeInverted_ = false;
 					InvalidateRect(hwnd, nullptr, FALSE);
+					ApplyWV2Theme();
 				}
 			} else {
 				// 受信中
