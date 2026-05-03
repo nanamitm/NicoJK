@@ -2453,7 +2453,11 @@ void CNicoJK::ToggleLogListNG(int index)
 		}
 	}
 	if (bChanged && hForce_) {
-		SendMessage(hForce_, WM_UPDATE_LIST, TRUE, 0);
+		if (logWV2Ready_) {
+			SendLogWV2AboneUpdate(marker.c_str(), bEnableNG);
+		} else {
+			SendMessage(hForce_, WM_UPDATE_LIST, TRUE, 0);
+		}
 	}
 }
 
@@ -3559,6 +3563,170 @@ void CNicoJK::ApplyWV2Theme()
 	pWV2_->PostWebMessageAsString(msg);
 }
 
+// ---- WebView2 ログ表示ヘルパー ----
+
+static std::wstring LogColorToHex(COLORREF cr) {
+	wchar_t buf[8];
+	swprintf_s(buf, L"#%02x%02x%02x", GetRValue(cr), GetGValue(cr), GetBValue(cr));
+	return buf;
+}
+
+static std::wstring LogJsonEsc(const wchar_t* s) {
+	std::wstring r;
+	for (; *s; ++s) {
+		switch (*s) {
+		case L'"':  r += L"\\\""; break;
+		case L'\\': r += L"\\\\"; break;
+		case L'\n': r += L"\\n";  break;
+		case L'\r': r += L"\\r";  break;
+		default:
+			if (*s < 0x20) { wchar_t e[8]; swprintf_s(e, L"\\u%04X", (unsigned)*s); r += e; }
+			else r += *s;
+		}
+	}
+	return r;
+}
+
+static const wchar_t* kLogHtml = LR"(<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+:root{--bg:#fff;--fg:#000}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);font-size:12pt}
+#L{width:100%;height:100%;overflow-y:scroll;overflow-x:hidden}
+.i{display:flex;align-items:baseline;padding:1px 3px;line-height:1.35;cursor:default;user-select:text}
+.i:hover{background:rgba(128,128,128,.1)}
+.i.s{outline:1px solid rgba(128,128,128,.4)}
+.i.ab{opacity:.35}
+.tm{flex-shrink:0;opacity:.5;font-size:.82em;margin-right:3px;white-space:nowrap}
+.mk{flex-shrink:0;font-size:.82em;margin-right:4px;white-space:nowrap;min-width:1.8em}
+.tx{word-break:break-all;flex:1}
+.msg .tx{font-style:italic}
+.hide .tx,.refuge-hide .tx{text-decoration:line-through;opacity:.65}
+</style></head><body><div id="L"></div><script>
+const L=document.getElementById('L');
+let bot=true,sel=null;
+L.addEventListener('scroll',()=>{bot=L.scrollTop+L.clientHeight>=L.scrollHeight-8;});
+L.addEventListener('contextmenu',e=>{
+  e.preventDefault();const it=e.target.closest('.i');if(!it)return;
+  if(sel)sel.classList.remove('s');sel=it;it.classList.add('s');
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'ctx',m:it.dataset.m,x:e.screenX,y:e.screenY,cp:it.querySelector('.tm').textContent+' '+(it.dataset.mk||'')+' '+it.dataset.t}));
+});
+function add(d){
+  const v=document.createElement('div');
+  v.className='i'+(d.tp?' '+d.tp:'')+(d.ab?' ab':'');
+  v.dataset.m=d.m||'';v.dataset.t=d.tx||'';v.dataset.mk=d.m?d.m.substring(0,3):'';
+  const tm=document.createElement('span');tm.className='tm';tm.textContent=d.tm;
+  const mk=document.createElement('span');mk.className='mk';if(d.mc)mk.style.color=d.mc;mk.textContent=d.m?(d.m.substring(0,3)+'  '):'';
+  const tx=document.createElement('span');tx.className='tx';if(d.cl)tx.style.color=d.cl;tx.textContent=d.ab?'':d.tx;
+  if(d.tp==='msg')v.append(tm,tx);else v.append(tm,mk,tx);
+  return v;
+}
+window.chrome.webview.addEventListener('message',e=>{
+  const msg=JSON.parse(e.data);
+  if(msg.cmd==='upd'){
+    for(let i=0;i<(msg.tr||0)&&L.firstChild;i++)L.removeChild(L.firstChild);
+    (msg.it||[]).forEach(d=>L.appendChild(add(d)));if(bot)L.scrollTop=L.scrollHeight;
+  }else if(msg.cmd==='rel'){
+    L.innerHTML='';bot=true;sel=null;
+    (msg.it||[]).forEach(d=>L.appendChild(add(d)));L.scrollTop=L.scrollHeight;
+  }else if(msg.cmd==='clr'){
+    L.innerHTML='';bot=true;sel=null;
+  }else if(msg.cmd==='ab'){
+    document.querySelectorAll('.i[data-m="'+CSS.escape(msg.m)+'"]').forEach(el=>{
+      const tx=el.querySelector('.tx');
+      if(msg.s){el.classList.add('ab');if(tx)tx.textContent='';}
+      else{el.classList.remove('ab');if(tx)tx.textContent=el.dataset.t;}
+    });
+    if(sel){sel.classList.remove('s');sel=null;}
+  }else if(msg.cmd==='thm'){
+    document.documentElement.style.setProperty('--bg',msg.bg);
+    document.documentElement.style.setProperty('--fg',msg.fg);
+    document.body.style.background=msg.bg;
+  }else if(msg.cmd==='fnt'){
+    document.body.style.fontSize=msg.sz+'pt';
+    document.body.style.fontFamily="'Segoe UI Emoji','"+msg.nm+"',sans-serif";
+  }
+});
+</script></body></html>)";
+
+std::wstring CNicoJK::LogElemToJson(const LOG_ELEM& e) const
+{
+	const wchar_t* tp = L"nico";
+	switch (e.type) {
+	case LOG_ELEM_TYPE_HIDE:        tp = L"hide"; break;
+	case LOG_ELEM_TYPE_REFUGE:      tp = L"refuge"; break;
+	case LOG_ELEM_TYPE_REFUGE_HIDE: tp = L"refuge-hide"; break;
+	case LOG_ELEM_TYPE_MESSAGE:     tp = L"msg"; break;
+	default: break;
+	}
+	COLORREF crM = e.type == LOG_ELEM_TYPE_MESSAGE ? RGB(0, 0, 0) :
+	    (e.type == LOG_ELEM_TYPE_DEFAULT || e.type == LOG_ELEM_TYPE_HIDE) ? s_.crNicoMarker : s_.crRefugeMarker;
+	const wchar_t* mk = e.marker;
+	if (!wcsncmp(mk, L"a:", 2)) mk += 2;
+	wchar_t tm[12];
+	swprintf_s(tm, L"%02d:%02d:%02d", e.st.wHour, e.st.wMinute, e.st.wSecond);
+	return std::wstring(L"{\"tx\":\"") + LogJsonEsc(e.text.c_str())
+	     + L"\",\"cl\":\"" + LogColorToHex(e.cr)
+	     + L"\",\"mc\":\"" + LogColorToHex(crM)
+	     + L"\",\"tp\":\"" + tp
+	     + L"\",\"m\":\""  + LogJsonEsc(mk)
+	     + L"\",\"ab\":"   + (e.bAbone ? L"true" : L"false")
+	     + L",\"tm\":\""   + tm + L"\"}";
+}
+
+void CNicoJK::SendLogWV2Update(int trimCount, int newCount)
+{
+	if (!pLogWV2_ || !logWV2Ready_) return;
+	std::wstring json = L"{\"cmd\":\"upd\",\"tr\":" + std::to_wstring(trimCount) + L",\"it\":[";
+	auto it = logList_.end();
+	for (int i = 0; i < newCount && it != logList_.begin(); ++i) --it;
+	bool first = true;
+	for (; it != logList_.end(); ++it) {
+		if (!first) json += L',';
+		json += LogElemToJson(*it);
+		first = false;
+	}
+	json += L"]}";
+	pLogWV2_->PostWebMessageAsString(json.c_str());
+}
+
+void CNicoJK::SendLogWV2Reload()
+{
+	if (!pLogWV2_ || !logWV2Ready_) return;
+	std::wstring json = L"{\"cmd\":\"rel\",\"it\":[";
+	bool first = true;
+	for (const auto& e : logList_) {
+		if (!first) json += L',';
+		json += LogElemToJson(e);
+		first = false;
+	}
+	json += L"]}";
+	pLogWV2_->PostWebMessageAsString(json.c_str());
+}
+
+void CNicoJK::ApplyLogWV2Theme()
+{
+	if (!pLogWV2_ || !logWV2Ready_) return;
+	if (!panelColor_.GetPanelBackBrush()) return;
+	COLORREF bg = panelColor_.GetPanelBack(), fg = panelColor_.GetPanelText();
+	wchar_t msg[128];
+	swprintf_s(msg, L"{\"cmd\":\"thm\",\"bg\":\"%s\",\"fg\":\"%s\"}",
+	    LogColorToHex(bg).c_str(), LogColorToHex(fg).c_str());
+	pLogWV2_->PostWebMessageAsString(msg);
+	wchar_t fnt[LF_FACESIZE + 64];
+	swprintf_s(fnt, L"{\"cmd\":\"fnt\",\"nm\":\"%s\",\"sz\":%d}",
+	    LogJsonEsc(s_.forceFontName).c_str(), s_.forceFontSize);
+	pLogWV2_->PostWebMessageAsString(fnt);
+}
+
+void CNicoJK::SendLogWV2AboneUpdate(LPCTSTR marker, bool state)
+{
+	if (!pLogWV2_ || !logWV2Ready_) return;
+	wchar_t msg[300];
+	swprintf_s(msg, L"{\"cmd\":\"ab\",\"m\":\"%s\",\"s\":%s}",
+	    LogJsonEsc(marker).c_str(), state ? L"true" : L"false");
+	pLogWV2_->PostWebMessageAsString(msg);
+}
+
 bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 {
 	int dpi = m_pApp->GetDPIFromWindow(hwnd);
@@ -3804,6 +3972,7 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		}
 		InvalidateRect(hCommentWindow_, nullptr, TRUE);
 	}
+	ApplyLogWV2Theme();
 	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
 		reinterpret_cast<LONG_PTR>(CreateSolidBrush(panelColor_.GetPanelBack()))));
 	InvalidateRect(hwndForce, nullptr, TRUE);
@@ -3938,6 +4107,127 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					}
 				}
 			}
+
+			// WebView2 ログ表示の非同期作成
+			{
+				std::wstring udPath = iniFileName_;
+				size_t dot = udPath.rfind(L'.');
+				if (dot != std::wstring::npos) udPath = udPath.substr(0, dot);
+				udPath += L"_log_webview2";
+				HWND hwndCap = hwnd;
+				CreateCoreWebView2EnvironmentWithOptions(nullptr, udPath.c_str(), nullptr,
+				    Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+				        [this, hwndCap](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+				            if (FAILED(hr) || !env || !IsWindow(hwndCap)) return S_OK;
+				            env->CreateCoreWebView2Controller(hwndCap,
+				                Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+				                    [this, hwndCap](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
+				                        if (FAILED(hr) || !ctrl || !IsWindow(hwndCap)) return S_OK;
+				                        pLogWV2Controller_ = ctrl;
+				                        ctrl->get_CoreWebView2(&pLogWV2_);
+				                        Microsoft::WRL::ComPtr<ICoreWebView2Settings> st;
+				                        if (SUCCEEDED(pLogWV2_->get_Settings(&st)) && st) {
+				                            st->put_AreDefaultContextMenusEnabled(FALSE);
+				                            st->put_IsZoomControlEnabled(FALSE);
+				                            st->put_AreDevToolsEnabled(FALSE);
+				                        }
+				                        // JS→C++ メッセージ受信（右クリックメニュー）
+				                        pLogWV2_->add_WebMessageReceived(
+				                            Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+				                                [this, hwndCap](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+				                                    LPWSTR raw = nullptr;
+				                                    args->TryGetWebMessageAsString(&raw);
+				                                    if (!raw || !IsWindow(hwndCap)) { CoTaskMemFree(raw); return S_OK; }
+				                                    std::wstring s(raw); CoTaskMemFree(raw);
+				                                    // シンプルな JSON フィールド抽出
+				                                    auto jstr = [&](const wchar_t* key) {
+				                                        std::wstring nd = std::wstring(L"\"") + key + L"\":\"";
+				                                        size_t p = s.find(nd);
+				                                        if (p == std::wstring::npos) return std::wstring();
+				                                        p += nd.size(); std::wstring r;
+				                                        while (p < s.size() && s[p] != L'"') {
+				                                            if (s[p] == L'\\' && p+1 < s.size()) { ++p; r += s[p]; }
+				                                            else r += s[p]; ++p;
+				                                        }
+				                                        return r;
+				                                    };
+				                                    auto jint = [&](const wchar_t* key) {
+				                                        std::wstring nd = std::wstring(L"\"") + key + L"\":";
+				                                        size_t p = s.find(nd);
+				                                        return p != std::wstring::npos ? _wtoi(s.c_str() + p + nd.size()) : 0;
+				                                    };
+				                                    std::wstring marker = jstr(L"m");
+				                                    std::wstring timeStr = jstr(L"tm");
+				                                    int sx = jint(L"x"), sy = jint(L"y");
+				                                    // marker と時刻で logList_ を検索
+				                                    int logIdx = -1;
+				                                    {
+				                                        auto it = logList_.begin();
+				                                        for (int i = 0; it != logList_.end(); ++it, ++i) {
+				                                            const wchar_t* m = it->marker;
+				                                            if (!wcsncmp(m, L"a:", 2)) m += 2;
+				                                            wchar_t tm[12]; swprintf_s(tm, L"%02d:%02d:%02d", it->st.wHour, it->st.wMinute, it->st.wSecond);
+				                                            if (marker == m && timeStr == tm) { logIdx = i; break; }
+				                                        }
+				                                        if (logIdx < 0) { // 時刻が一致しない場合は marker のみで検索
+				                                            it = logList_.begin();
+				                                            for (int i = 0; it != logList_.end(); ++it, ++i) {
+				                                                const wchar_t* m = it->marker;
+				                                                if (!wcsncmp(m, L"a:", 2)) m += 2;
+				                                                if (marker == m) { logIdx = i; break; }
+				                                            }
+				                                        }
+				                                    }
+				                                    HMENU hMenu = CreatePopupMenu();
+				                                    if (!hMenu) return S_OK;
+				                                    AppendMenu(hMenu, MF_STRING, ID_FORCE_LIST_COPY, TEXT("コピー(&C)"));
+				                                    if (logIdx >= 0) {
+				                                        int ngState = GetLogListNGState(logIdx);
+				                                        if (ngState >= 0) {
+				                                            AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+				                                            AppendMenu(hMenu, MF_STRING, ID_FORCE_LIST_TOGGLE_NG,
+				                                                ngState ? TEXT("NG解除(&N)") : TEXT("NG登録(&N)"));
+				                                        }
+				                                    }
+				                                    SetForegroundWindow(hwndCap);
+				                                    UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, hwndCap, nullptr);
+				                                    DestroyMenu(hMenu);
+				                                    if (cmd == ID_FORCE_LIST_COPY && logIdx >= 0) {
+				                                        auto it = logList_.begin(); std::advance(it, logIdx);
+				                                        const wchar_t* m = it->marker;
+				                                        if (!wcsncmp(m, L"a:", 2)) m += 2;
+				                                        TCHAR buf[512];
+				                                        _stprintf_s(buf, TEXT("%02d:%02d:%02d (%.3s)%s"),
+				                                            it->st.wHour, it->st.wMinute, it->st.wSecond, m,
+				                                            it->bAbone ? TEXT("") : it->text.c_str());
+				                                        CopyTextToClipboard(hwndCap, buf);
+				                                    } else if (cmd == ID_FORCE_LIST_TOGGLE_NG && logIdx >= 0) {
+				                                        ToggleLogListNG(logIdx);
+				                                    }
+				                                    return S_OK;
+				                                }).Get(), &logWV2MsgToken_);
+				                        // ページ読み込み完了後に初期化
+				                        pLogWV2_->add_NavigationCompleted(
+				                            Callback<ICoreWebView2NavigationCompletedEventHandler>(
+				                                [this, hwndCap](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
+				                                    if (logWV2Ready_) return S_OK;
+				                                    logWV2Ready_ = true;
+				                                    ApplyLogWV2Theme();
+				                                    SendLogWV2Reload();
+				                                    logListDisplayedSize_ = (int)logList_.size();
+				                                    pLogWV2Controller_->put_IsVisible(bDisplayLogList_);
+				                                    ShowWindow(GetDlgItem(hwndCap, IDC_FORCELIST), bDisplayLogList_ ? SW_HIDE : SW_SHOW);
+				                                    RECT rc; GetClientRect(hwndCap, &rc);
+				                                    PostMessage(hwndCap, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+				                                    return S_OK;
+				                                }).Get(), nullptr);
+				                        ctrl->put_IsVisible(FALSE);
+				                        pLogWV2_->NavigateToString(kLogHtml);
+				                        return S_OK;
+				                    }).Get());
+				            return S_OK;
+				        }).Get());
+			}
 			return 0;
 		}
 		return -1;
@@ -4036,6 +4326,10 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			SaveToIni();
 			m_pApp->SetPluginCommandState(COMMAND_HIDE_FORCE, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
 			m_pApp->SetPluginCommandState(COMMAND_HIDE_COMMENT, TVTest::PLUGIN_COMMAND_STATE_DISABLED);
+			// WebView2 ログ表示を解放
+			if (pLogWV2_) { pLogWV2_->remove_WebMessageReceived(logWV2MsgToken_); }
+			if (pLogWV2Controller_) { pLogWV2Controller_->Close(); }
+			pLogWV2_.Reset(); pLogWV2Controller_.Reset(); logWV2Ready_ = false;
 			// キャッシュ DWrite フォーマットとオフスクリーン DC を解放
 			if (pDWriteFormat_) { pDWriteFormat_->Release(); pDWriteFormat_ = nullptr; }
 			if (hdcMemCache_) {
@@ -4454,6 +4748,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		case IDC_RADIO_FORCE:
 		case IDC_RADIO_LOG:
 			bDisplayLogList_ = SendDlgItemMessage(hwnd, IDC_RADIO_LOG, BM_GETCHECK, 0, 0 ) == BST_CHECKED;
+			if (pLogWV2Controller_) pLogWV2Controller_->put_IsVisible(bDisplayLogList_ && logWV2Ready_);
+			ShowWindow(GetDlgItem(hwnd, IDC_FORCELIST), bDisplayLogList_ && logWV2Ready_ ? SW_HIDE : SW_SHOW);
 			SendMessage(hwnd, WM_UPDATE_LIST, TRUE, 0);
 			PostMessage(hwnd, WM_TIMER, TIMER_UPDATE, 0);
 			break;
@@ -4932,42 +5228,60 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 			if (bDisplayLogList_) {
 				// ログリスト表示中
-				int iSelItemIndex = ListBox_GetCurSel(hList);
-				if (logList_.size() < logListDisplayedSize_ || ListBox_GetCount(hList) != logListDisplayedSize_) {
-					ListBox_ResetContent(hList);
-					logListDisplayedSize_ = 0;
-				}
-				// logList_とリストボックスの内容が常に同期するように更新する
-				std::list<LOG_ELEM>::const_iterator it = logList_.end();
-				for (size_t i = logList_.size() - logListDisplayedSize_; i > 0; --i, --it);
-				for (; it != logList_.end(); ++it) {
-					COLORREF crMarker = it->type == LOG_ELEM_TYPE_MESSAGE ? RGB(0, 0, 0) :
-					                    it->type == LOG_ELEM_TYPE_DEFAULT || it->type == LOG_ELEM_TYPE_HIDE ? s_.crNicoMarker : s_.crRefugeMarker;
-					// IDにつく接頭辞は識別上の価値がないのでとばす
-					int markerPrefixLen = !_tcsncmp(it->marker, TEXT("a:"), 2) ? 2 : 0;
-					TCHAR text[256];
-					_stprintf_s(text, TEXT("%s[%u,%u,9]{00:00:00 (MMM)}%02d:%02d:%02d (%.3s)%s"),
-					            it->type == LOG_ELEM_TYPE_MESSAGE ? TEXT("#") : TEXT(""), static_cast<DWORD>(it->cr), static_cast<DWORD>(crMarker),
-					            it->st.wHour, it->st.wMinute, it->st.wSecond,
-					            it->marker + markerPrefixLen, &TEXT("   ")[min<size_t>(_tcslen(it->marker + markerPrefixLen), 3)]);
-					if (!it->bAbone) {
-						_tcsncpy_s(text + _tcslen(text), _countof(text) - _tcslen(text), it->text.c_str(), _TRUNCATE);
+				if (logWV2Ready_) {
+					// WebView2 パス
+					if (wParam) {
+						// フルリロード
+						for (; logList_.size() > COMMENT_TRIMEND; logList_.pop_front());
+						logListDisplayedSize_ = (int)logList_.size();
+						SendLogWV2Reload();
+					} else {
+						// 差分更新
+						int trimCount = 0;
+						while ((int)logList_.size() > COMMENT_TRIMEND) {
+							logList_.pop_front(); ++trimCount;
+							if (logListDisplayedSize_ > 0) --logListDisplayedSize_;
+						}
+						int newCount = (int)logList_.size() - (int)logListDisplayedSize_;
+						if (newCount < 0) {
+							logListDisplayedSize_ = 0;
+							SendLogWV2Reload();
+							logListDisplayedSize_ = (int)logList_.size();
+						} else if (trimCount > 0 || newCount > 0) {
+							SendLogWV2Update(trimCount, newCount);
+							logListDisplayedSize_ = (int)logList_.size();
+						}
 					}
-					ListBox_AddString(hList, text);
-					++logListDisplayedSize_;
-				}
-				while (logList_.size() > COMMENT_TRIMEND) {
-					logList_.pop_front();
-					ListBox_DeleteString(hList, 0);
-					--logListDisplayedSize_;
-					--iSelItemIndex;
-					--iTopItemIndex;
-				}
-				if (iSelItemIndex < 0) {
-					ListBox_SetTopIndex(hList, ListBox_GetCount(hList) - 1);
 				} else {
-					ListBox_SetCurSel(hList, iSelItemIndex);
-					ListBox_SetTopIndex(hList, max(iTopItemIndex, 0));
+					// フォールバック: リストボックス
+					int iSelItemIndex = ListBox_GetCurSel(hList);
+					if (logList_.size() < logListDisplayedSize_ || ListBox_GetCount(hList) != logListDisplayedSize_) {
+						ListBox_ResetContent(hList);
+						logListDisplayedSize_ = 0;
+					}
+					std::list<LOG_ELEM>::const_iterator it = logList_.end();
+					for (size_t i = logList_.size() - logListDisplayedSize_; i > 0; --i, --it);
+					for (; it != logList_.end(); ++it) {
+						COLORREF crMarker = it->type == LOG_ELEM_TYPE_MESSAGE ? RGB(0, 0, 0) :
+						                    it->type == LOG_ELEM_TYPE_DEFAULT || it->type == LOG_ELEM_TYPE_HIDE ? s_.crNicoMarker : s_.crRefugeMarker;
+						int markerPrefixLen = !_tcsncmp(it->marker, TEXT("a:"), 2) ? 2 : 0;
+						TCHAR text[256];
+						_stprintf_s(text, TEXT("%s[%u,%u,9]{00:00:00 (MMM)}%02d:%02d:%02d (%.3s)%s"),
+						            it->type == LOG_ELEM_TYPE_MESSAGE ? TEXT("#") : TEXT(""), static_cast<DWORD>(it->cr), static_cast<DWORD>(crMarker),
+						            it->st.wHour, it->st.wMinute, it->st.wSecond,
+						            it->marker + markerPrefixLen, &TEXT("   ")[min<size_t>(_tcslen(it->marker + markerPrefixLen), 3)]);
+						if (!it->bAbone) {
+							_tcsncpy_s(text + _tcslen(text), _countof(text) - _tcslen(text), it->text.c_str(), _TRUNCATE);
+						}
+						ListBox_AddString(hList, text);
+						++logListDisplayedSize_;
+					}
+					while (logList_.size() > COMMENT_TRIMEND) {
+						logList_.pop_front(); ListBox_DeleteString(hList, 0);
+						--logListDisplayedSize_; --iSelItemIndex; --iTopItemIndex;
+					}
+					if (iSelItemIndex < 0) { ListBox_SetTopIndex(hList, ListBox_GetCount(hList) - 1); }
+					else { ListBox_SetCurSel(hList, iSelItemIndex); ListBox_SetTopIndex(hList, max(iTopItemIndex, 0)); }
 				}
 			} else {
 				// 勢いリスト表示中
@@ -5315,6 +5629,16 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 			}
 			SetWindowPos(hItem, nullptr, 0, 0, rcParent.right-rc.left*2, rcParent.bottom-rc.top-padding, SWP_NOMOVE | SWP_NOZORDER);
+			// WebView2 をリストボックスと同じ矩形に配置、表示モードに応じて切り替え
+			if (pLogWV2Controller_) {
+				RECT wv2Bounds; GetWindowRect(hItem, &wv2Bounds);
+				MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&wv2Bounds), 2);
+				if (wv2Bounds.right < wv2Bounds.left) wv2Bounds.right = wv2Bounds.left;
+				if (wv2Bounds.bottom < wv2Bounds.top) wv2Bounds.bottom = wv2Bounds.top;
+				pLogWV2Controller_->put_Bounds(wv2Bounds);
+				pLogWV2Controller_->put_IsVisible(bDisplayLogList_ && logWV2Ready_);
+			}
+			ShowWindow(hItem, bDisplayLogList_ && logWV2Ready_ ? SW_HIDE : SW_SHOW);
 		}
 		break;
 	case WM_CTLCOLOREDIT:

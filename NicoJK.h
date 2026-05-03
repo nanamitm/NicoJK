@@ -225,6 +225,11 @@ private:
 	bool CreateForceWindowItems(HWND hwnd);
 	void SetOpacity(HWND hwnd, int opacityOrToggle);
 	LRESULT ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+	std::wstring LogElemToJson(const LOG_ELEM& e) const;
+	void SendLogWV2Update(int trimCount, int newCount);
+	void SendLogWV2Reload();
+	void ApplyLogWV2Theme();
+	void SendLogWV2AboneUpdate(LPCTSTR marker, bool state);
 	static BOOL CALLBACK StreamCallback(BYTE *pData, void *pClientData);
 
 	// 設定ファイルの名前
@@ -256,6 +261,10 @@ private:
 	Microsoft::WRL::ComPtr<ICoreWebView2>           pWV2_;
 	EventRegistrationToken                          wv2MsgToken_ = {};
 	bool                                            wv2Ready_    = false;
+	Microsoft::WRL::ComPtr<ICoreWebView2Controller> pLogWV2Controller_;
+	Microsoft::WRL::ComPtr<ICoreWebView2>           pLogWV2_;
+	EventRegistrationToken                          logWV2MsgToken_ = {};
+	bool                                            logWV2Ready_    = false;
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
