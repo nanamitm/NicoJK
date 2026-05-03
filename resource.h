@@ -20,3 +20,4 @@
 #define IDC_BUTTON_POPUP                        1010
 #define IDC_BUTTON_LOGIN                        1011
 #define IDC_BUTTON_HELP                         1012
+#define IDC_BUTTON_COMMENT                      1013
