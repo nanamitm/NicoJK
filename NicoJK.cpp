@@ -450,7 +450,6 @@ bool CNicoJK::GetPluginInfo(TVTest::PluginInfo *pInfo)
 
 bool CNicoJK::Initialize()
 {
-	m_pApp->AddLog(L"NicoJK: Initialize 開始");
 	// ウィンドウクラスを登録
 	WNDCLASSEX wcPanel = {};
 	wcPanel.cbSize = sizeof(wcPanel);
@@ -459,7 +458,6 @@ bool CNicoJK::Initialize()
 	wcPanel.hInstance = g_hinstDLL;
 	wcPanel.lpszClassName = TEXT("ru.jk.panel");
 	if (RegisterClassEx(&wcPanel) == 0) {
-		m_pApp->AddLog(L"NicoJK: ru.jk.panel 登録失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
 	WNDCLASSEX wcPanelPopup = {};
@@ -469,7 +467,6 @@ bool CNicoJK::Initialize()
 	wcPanelPopup.hInstance = g_hinstDLL;
 	wcPanelPopup.lpszClassName = TEXT("ru.jk.panelpopup");
 	if (RegisterClassEx(&wcPanelPopup) == 0) {
-		m_pApp->AddLog(L"NicoJK: ru.jk.panelpopup 登録失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
 	WNDCLASSEX wc = {};
@@ -480,7 +477,6 @@ bool CNicoJK::Initialize()
 	wc.hbrBackground = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
 	wc.lpszClassName = TEXT("ru.jk.force");
 	if (RegisterClassEx(&wc) == 0) {
-		m_pApp->AddLog(L"NicoJK: ru.jk.force 登録失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
 	WNDCLASSEX wcHelp = {};
@@ -492,7 +488,6 @@ bool CNicoJK::Initialize()
 	wcHelp.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 	wcHelp.lpszClassName = TEXT("ru.jk.help");
 	if (RegisterClassEx(&wcHelp) == 0) {
-		m_pApp->AddLog(L"NicoJK: ru.jk.help 登録失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
 	WNDCLASSEX wcLogin = {};
@@ -504,7 +499,6 @@ bool CNicoJK::Initialize()
 	wcLogin.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 	wcLogin.lpszClassName = TEXT("ru.jk.login");
 	if (RegisterClassEx(&wcLogin) == 0) {
-		m_pApp->AddLog(L"NicoJK: ru.jk.login 登録失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
 	WNDCLASSEX wcComment = {};
@@ -516,10 +510,8 @@ bool CNicoJK::Initialize()
 	wcComment.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 	wcComment.lpszClassName = TEXT("ru.jk.commentpost");
 	if (RegisterClassEx(&wcComment) == 0) {
-		m_pApp->AddLog(L"NicoJK: ru.jk.commentpost 登録失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
-	m_pApp->AddLog(L"NicoJK: ウィンドウクラス登録完了");
 	// 初期化処理
 	TCHAR path[MAX_PATH];
 	iniFileName_.clear();
@@ -541,12 +533,9 @@ bool CNicoJK::Initialize()
 	bool bEnableOsdCompositor = GetPrivateProfileInt(TEXT("Setting"), TEXT("enableOsdCompositor"), 0, iniFileName_.c_str()) != 0;
 	// フィルタグラフを取得できないバージョンではAPIフックを使う
 	bool bSetHookOsdCompositor = m_pApp->GetVersion() < TVTest::MakeVersion(0, 9, 0);
-	m_pApp->AddLog(L"NicoJK: commentWindow_.Initialize 開始");
 	if (!commentWindow_.Initialize(g_hinstDLL, &bEnableOsdCompositor, bSetHookOsdCompositor)) {
-		m_pApp->AddLog(L"NicoJK: commentWindow_.Initialize 失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
-	m_pApp->AddLog(L"NicoJK: commentWindow_.Initialize 完了");
 	// Direct2D / DirectWrite 初期化 (リストボックスのカラー絵文字対応)
 	{
 		D2D1_FACTORY_OPTIONS d2dOpts = {};
@@ -657,12 +646,6 @@ bool CNicoJK::Finalize()
 
 bool CNicoJK::TogglePlugin(bool bEnabled)
 {
-	{
-		TCHAR dbg[128];
-		_stprintf_s(dbg, TEXT("NicoJK: TogglePlugin(%d) bUsePanel=%d hPanel_=%p hForce_=%p"),
-		    bEnabled, s_.bUsePanel, hPanel_, hForce_);
-		m_pApp->AddLog(dbg);
-	}
 	if (bEnabled) {
 		if ((!s_.bUsePanel || hPanel_) && !hForce_) {
 			LoadFromIni();
@@ -3668,9 +3651,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 {
 	switch (uMsg) {
 	case WM_CREATE:
-		m_pApp->AddLog(hPanel_ ? L"NicoJK: ForceWindow WM_CREATE - パネルモード" : L"NicoJK: ForceWindow WM_CREATE - スタンドアローンモード");
 		if (CreateForceWindowItems(hwnd)) {
-			m_pApp->AddLog(L"NicoJK: CreateForceWindowItems 成功");
 			logList_.clear();
 			logListDisplayedSize_ = 0;
 			bPendingTimerUpdateList_ = false;
@@ -3727,11 +3708,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 
 			m_pApp->SetPluginCommandState(COMMAND_HIDE_FORCE, 0);
 			if (hPanel_ || (s_.hideForceWindow & 1) == 0) {
-				m_pApp->AddLog(L"NicoJK: ShowWindow 呼び出し");
 				ShowWindow(hwnd, SW_SHOWNA);
 				SendMessage(hwnd, WM_SET_ZORDER, 0, 0);
-			} else {
-				m_pApp->AddLog(L"NicoJK: ShowWindow スキップ (hideForceWindow設定)");
 			}
 			// TVTest起動直後はVideo Containerウィンドウの配置が定まっていないようなので再度整える
 			SetTimer(hwnd, TIMER_DONE_SIZE, 500, nullptr);
@@ -3800,7 +3778,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 			return 0;
 		}
-		m_pApp->AddLog(L"NicoJK: CreateForceWindowItems 失敗 → WM_CREATE -1 返却", TVTest::LOG_TYPE_ERROR);
 		return -1;
 	case WM_DESTROY:
 		{
