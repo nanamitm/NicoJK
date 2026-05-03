@@ -514,9 +514,9 @@ bool CNicoJK::Initialize()
 	wcComment.hInstance = g_hinstDLL;
 	wcComment.hCursor = LoadCursor(nullptr, IDC_ARROW);
 	wcComment.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-	wcComment.lpszClassName = TEXT("ru.jk.comment");
+	wcComment.lpszClassName = TEXT("ru.jk.commentpost");
 	if (RegisterClassEx(&wcComment) == 0) {
-		m_pApp->AddLog(L"NicoJK: ru.jk.comment 登録失敗", TVTest::LOG_TYPE_ERROR);
+		m_pApp->AddLog(L"NicoJK: ru.jk.commentpost 登録失敗", TVTest::LOG_TYPE_ERROR);
 		return false;
 	}
 	m_pApp->AddLog(L"NicoJK: ウィンドウクラス登録完了");
@@ -1921,7 +1921,7 @@ void CNicoJK::ShowCommentWindow()
 		if (hForce_) GetWindowRect(hForce_, &rc);
 		int x = rc.left ? rc.left + 16 : CW_USEDEFAULT;
 		int y = rc.top  ? rc.top  + 16 : CW_USEDEFAULT;
-		hCommentWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.comment"), TEXT("NicoJK - コメント投稿"),
+		hCommentWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.commentpost"), TEXT("NicoJK - コメント投稿"),
 		                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
 		                                 x, y, 440, 180, hForce_, nullptr, g_hinstDLL, this);
 	}
