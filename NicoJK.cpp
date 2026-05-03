@@ -3662,7 +3662,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 {
 	switch (uMsg) {
 	case WM_CREATE:
+		m_pApp->AddLog(hPanel_ ? L"NicoJK: ForceWindow WM_CREATE - パネルモード" : L"NicoJK: ForceWindow WM_CREATE - スタンドアローンモード");
 		if (CreateForceWindowItems(hwnd)) {
+			m_pApp->AddLog(L"NicoJK: CreateForceWindowItems 成功");
 			logList_.clear();
 			logListDisplayedSize_ = 0;
 			bPendingTimerUpdateList_ = false;
@@ -3719,8 +3721,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 
 			m_pApp->SetPluginCommandState(COMMAND_HIDE_FORCE, 0);
 			if (hPanel_ || (s_.hideForceWindow & 1) == 0) {
+				m_pApp->AddLog(L"NicoJK: ShowWindow 呼び出し");
 				ShowWindow(hwnd, SW_SHOWNA);
 				SendMessage(hwnd, WM_SET_ZORDER, 0, 0);
+			} else {
+				m_pApp->AddLog(L"NicoJK: ShowWindow スキップ (hideForceWindow設定)");
 			}
 			// TVTest起動直後はVideo Containerウィンドウの配置が定まっていないようなので再度整える
 			SetTimer(hwnd, TIMER_DONE_SIZE, 500, nullptr);
@@ -3789,6 +3794,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 			return 0;
 		}
+		m_pApp->AddLog(L"NicoJK: CreateForceWindowItems 失敗 → WM_CREATE -1 返却", TVTest::LOG_TYPE_ERROR);
 		return -1;
 	case WM_DESTROY:
 		{
