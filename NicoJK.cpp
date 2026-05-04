@@ -3791,34 +3791,22 @@ static std::string CwsJStr(const std::string& s, const char* key) {
 		case 'u':
 			if (p + 4 < s.size()) {
 				char h[5] = { s[p+1], s[p+2], s[p+3], s[p+4], '\0' };
-				unsigned cp = static_cast<unsigned>(std::strtoul(h, nullptr, 16));
+				wchar_t wc = static_cast<wchar_t>(std::strtoul(h, nullptr, 16));
 				p += 4;
-				// サロゲートペア (U+D800–U+DBFF) の処理
-				if (cp >= 0xD800 && cp <= 0xDBFF && p + 6 < s.size() &&
+				wchar_t wbuf[2] = { wc, L'\0' };
+				int wlen = 1;
+				// サロゲートペア (U+D800–U+DBFF)
+				if (wc >= 0xD800 && wc <= 0xDBFF && p + 6 < s.size() &&
 				    s[p+1] == '\\' && s[p+2] == 'u') {
 					char h2[5] = { s[p+3], s[p+4], s[p+5], s[p+6], '\0' };
-					unsigned cp2 = static_cast<unsigned>(std::strtoul(h2, nullptr, 16));
-					if (cp2 >= 0xDC00 && cp2 <= 0xDFFF) {
-						cp = 0x10000 + ((cp - 0xD800) << 10) + (cp2 - 0xDC00);
-						p += 6;
+					wchar_t wc2 = static_cast<wchar_t>(std::strtoul(h2, nullptr, 16));
+					if (wc2 >= 0xDC00 && wc2 <= 0xDFFF) {
+						wbuf[1] = wc2; wlen = 2; p += 6;
 					}
 				}
-				// UTF-8 エンコード
-				if (cp < 0x80) {
-					r += static_cast<char>(cp);
-				} else if (cp < 0x800) {
-					r += static_cast<char>(0xC0 | (cp >> 6));
-					r += static_cast<char>(0x80 | (cp & 0x3F));
-				} else if (cp < 0x10000) {
-					r += static_cast<char>(0xE0 | (cp >> 12));
-					r += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-					r += static_cast<char>(0x80 | (cp & 0x3F));
-				} else {
-					r += static_cast<char>(0xF0 | (cp >> 18));
-					r += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-					r += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-					r += static_cast<char>(0x80 | (cp & 0x3F));
-				}
+				char mb[8] = {};
+				int n = WideCharToMultiByte(CP_UTF8, 0, wbuf, wlen, mb, sizeof(mb), nullptr, nullptr);
+				r.append(mb, n);
 			}
 			break;
 		default: r += s[p]; break;
