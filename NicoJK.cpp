@@ -3608,7 +3608,11 @@ L.addEventListener('scroll',()=>{bot=L.scrollTop+L.clientHeight>=L.scrollHeight-
 L.addEventListener('contextmenu',e=>{
   e.preventDefault();const it=e.target.closest('.i');if(!it)return;
   if(sel)sel.classList.remove('s');sel=it;it.classList.add('s');
-  window.chrome.webview.postMessage(JSON.stringify({cmd:'ctx',m:it.dataset.m,x:e.screenX,y:e.screenY,cp:it.querySelector('.tm').textContent+' '+(it.dataset.mk||'')+' '+it.dataset.t}));
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'ctx',m:it.dataset.m,tm:it.querySelector('.tm').textContent,x:e.screenX,y:e.screenY}));
+});
+L.addEventListener('dblclick',e=>{
+  const it=e.target.closest('.i');if(!it||it.classList.contains('msg'))return;
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'dbl',m:it.dataset.m,tm:it.querySelector('.tm').textContent}));
 });
 function add(d){
   const v=document.createElement('div');
@@ -3721,9 +3725,12 @@ void CNicoJK::ApplyLogWV2Theme()
 void CNicoJK::SendLogWV2AboneUpdate(LPCTSTR marker, bool state)
 {
 	if (!pLogWV2_ || !logWV2Ready_) return;
+	// DOM の data-m は "a:" プレフィックスを除いて格納されているため合わせる
+	const wchar_t* m = marker;
+	if (m && !wcsncmp(m, L"a:", 2)) m += 2;
 	wchar_t msg[300];
 	swprintf_s(msg, L"{\"cmd\":\"ab\",\"m\":\"%s\",\"s\":%s}",
-	    LogJsonEsc(marker).c_str(), state ? L"true" : L"false");
+	    LogJsonEsc(m).c_str(), state ? L"true" : L"false");
 	pLogWV2_->PostWebMessageAsString(msg);
 }
 
@@ -4177,6 +4184,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                                if (marker == m) { logIdx = i; break; }
 				                                            }
 				                                        }
+				                                    }
+				                                    // ダブルクリック NG 登録/解除
+				                                    if (s.find(L"\"cmd\":\"dbl\"") != std::wstring::npos) {
+				                                        if (logIdx >= 0) ToggleLogListNG(logIdx);
+				                                        return S_OK;
 				                                    }
 				                                    HMENU hMenu = CreatePopupMenu();
 				                                    if (!hMenu) return S_OK;
