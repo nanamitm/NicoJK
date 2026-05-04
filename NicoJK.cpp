@@ -3588,17 +3588,21 @@ static std::wstring LogJsonEsc(const wchar_t* s) {
 }
 
 static const wchar_t* kLogHtml = LR"(<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
-:root{--bg:#fff;--fg:#000}
+:root{--bg:#fff;--fg:#000;--sb:rgba(128,128,128,.45)}
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);font-size:12pt}
 #L{width:100%;height:100%;overflow-y:scroll;overflow-x:hidden}
-.i{display:flex;align-items:baseline;padding:1px 3px;line-height:1.35;cursor:default;user-select:text}
+#L::-webkit-scrollbar{width:8px}
+#L::-webkit-scrollbar-track{background:transparent}
+#L::-webkit-scrollbar-thumb{background:var(--sb);border-radius:4px}
+#L::-webkit-scrollbar-thumb:hover{background:var(--fg);opacity:.5}
+.i{display:flex;align-items:baseline;padding:1px 3px;line-height:1.35;cursor:default;user-select:text;overflow:hidden}
 .i:hover{background:rgba(128,128,128,.1)}
 .i.s{outline:1px solid rgba(128,128,128,.4)}
 .i.ab{opacity:.35}
 .tm{flex-shrink:0;opacity:.5;font-size:.82em;margin-right:3px;white-space:nowrap}
-.mk{flex-shrink:0;font-size:.82em;margin-right:4px;white-space:nowrap;min-width:1.8em}
-.tx{word-break:break-all;flex:1}
+.mk{flex-shrink:0;width:3.2em;font-size:.82em;overflow:hidden;white-space:nowrap}
+.tx{white-space:nowrap;overflow:hidden;min-width:0;flex:1}
 .msg .tx{font-style:italic}
 .hide .tx,.refuge-hide .tx{text-decoration:line-through;opacity:.65}
 </style></head><body><div id="L"></div><script>
@@ -3644,6 +3648,7 @@ window.chrome.webview.addEventListener('message',e=>{
   }else if(msg.cmd==='thm'){
     document.documentElement.style.setProperty('--bg',msg.bg);
     document.documentElement.style.setProperty('--fg',msg.fg);
+    if(msg.sb)document.documentElement.style.setProperty('--sb',msg.sb);
     document.body.style.background=msg.bg;
   }else if(msg.cmd==='fnt'){
     document.body.style.fontSize=msg.sz+'pt';
@@ -3668,15 +3673,17 @@ std::wstring CNicoJK::LogElemToJson(const LOG_ELEM& e) const
 	if (!wcsncmp(mk, L"a:", 2)) mk += 2;
 	wchar_t tm[12];
 	swprintf_s(tm, L"%02d:%02d:%02d", e.st.wHour, e.st.wMinute, e.st.wSecond);
-	// WM_DRAWITEM(line 4519): bEmphasis(#プレフィックス=MSG型) のとき RGB(0xFF,0,0) で描画
-	COLORREF cr = (e.type == LOG_ELEM_TYPE_MESSAGE) ? RGB(0xFF, 0, 0) : e.cr;
-	return std::wstring(L"{\"tx\":\"") + LogJsonEsc(e.text.c_str())
-	     + L"\",\"cl\":\"" + LogColorToHex(cr)
-	     + L"\",\"mc\":\"" + LogColorToHex(crM)
-	     + L"\",\"tp\":\"" + tp
-	     + L"\",\"m\":\""  + LogJsonEsc(mk)
-	     + L"\",\"ab\":"   + (e.bAbone ? L"true" : L"false")
-	     + L",\"tm\":\""   + tm + L"\"}";
+	// WM_DRAWITEM(line 4519): bEmphasis=MSG型のとき赤。それ以外はパネル文字色（CSS var(--fg)）
+	std::wstring json = std::wstring(L"{\"tx\":\"") + LogJsonEsc(e.text.c_str());
+	if (e.type == LOG_ELEM_TYPE_MESSAGE) {
+		json += L"\",\"cl\":\"#ff0000";  // 赤固定
+	}
+	json += L"\",\"mc\":\"" + LogColorToHex(crM)
+	      + L"\",\"tp\":\"" + tp
+	      + L"\",\"m\":\""  + LogJsonEsc(mk)
+	      + L"\",\"ab\":"   + (e.bAbone ? L"true" : L"false")
+	      + L",\"tm\":\""   + tm + L"\"}";
+	return json;
 }
 
 void CNicoJK::SendLogWV2Update(int trimCount, int newCount)
@@ -3714,9 +3721,13 @@ void CNicoJK::ApplyLogWV2Theme()
 	if (!pLogWV2_ || !logWV2Ready_) return;
 	if (!panelColor_.GetPanelBackBrush()) return;
 	COLORREF bg = panelColor_.GetPanelBack(), fg = panelColor_.GetPanelText();
-	wchar_t msg[128];
-	swprintf_s(msg, L"{\"cmd\":\"thm\",\"bg\":\"%s\",\"fg\":\"%s\"}",
-	    LogColorToHex(bg).c_str(), LogColorToHex(fg).c_str());
+	// スクロールバー色: bg と fg の中間 (ダーク/ライト両対応)
+	COLORREF sb = RGB((GetRValue(bg) + GetRValue(fg)) / 2,
+	                  (GetGValue(bg) + GetGValue(fg)) / 2,
+	                  (GetBValue(bg) + GetBValue(fg)) / 2);
+	wchar_t msg[192];
+	swprintf_s(msg, L"{\"cmd\":\"thm\",\"bg\":\"%s\",\"fg\":\"%s\",\"sb\":\"%s\"}",
+	    LogColorToHex(bg).c_str(), LogColorToHex(fg).c_str(), LogColorToHex(sb).c_str());
 	pLogWV2_->PostWebMessageAsString(msg);
 	wchar_t fnt[LF_FACESIZE + 64];
 	swprintf_s(fnt, L"{\"cmd\":\"fnt\",\"nm\":\"%s\",\"sz\":%d}",
