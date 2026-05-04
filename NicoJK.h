@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <atomic>
+#include <map>
 #include <thread>
 #include <WebView2.h>
 #include <wrl/client.h>
@@ -94,6 +95,7 @@ private:
 		tstring execGetCookie;
 		tstring execGetV10Key;
 		std::string channelsUri;
+		std::string channelsWsUri;
 		std::string refugeUri;
 		bool bDropForwardedComment;
 		bool bRefugeMixing;
@@ -224,6 +226,7 @@ private:
 	static LRESULT CALLBACK LoginButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 	bool CreateForceWindowItems(HWND hwnd);
 	void SetOpacity(HWND hwnd, int opacityOrToggle);
+	void ChannelWsThreadFunc(HWND hwndForce, std::string wsUri);
 	LRESULT ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	std::wstring LogElemToJson(const LOG_ELEM& e) const;
 	void SendLogWV2Update(int trimCount, int newCount);
@@ -265,6 +268,11 @@ private:
 	Microsoft::WRL::ComPtr<ICoreWebView2>           pLogWV2_;
 	EventRegistrationToken                          logWV2MsgToken_ = {};
 	bool                                            logWV2Ready_    = false;
+	// channels WebSocket (channelsWsUri)
+	std::map<int, tstring>    programTitleMap_;
+	std::thread               channelWsThread_;
+	HANDLE                    hChannelWsQuit_      = nullptr;
+	std::atomic<bool>         channelWsConnected_  {false};
 	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)

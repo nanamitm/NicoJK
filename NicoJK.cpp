@@ -25,7 +25,9 @@
 #include <dwrite_2.h>
 #include <Vsstyle.h>
 #include <richedit.h>
+#include <winhttp.h>
 #include <wrl/event.h>
+#pragma comment(lib, "winhttp.lib")
 using Microsoft::WRL::Callback;
 
 #pragma comment(lib, "dwmapi.lib")
@@ -112,6 +114,7 @@ const UINT WM_POST_COMMENT = WM_APP + 108;
 const UINT WM_TOGGLE_LOG_LIST_NG = WM_APP + 109;
 const UINT WM_GET_LOG_LIST_NG_STATE = WM_APP + 110;
 const UINT WMS_LOGIN_SETTINGS = WM_APP + 111;
+const UINT WMS_CHANNEL_WS    = WM_APP + 113;
 
 const UINT ID_FORCE_LIST_COPY = 1;
 const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
@@ -852,6 +855,7 @@ void CNicoJK::LoadFromIni()
 	s_.execGetCookie		= GetBufferedProfileToString(buf.data(), TEXT("execGetCookie"), TEXT("cmd /c echo ;"));
 	s_.execGetV10Key		= GetBufferedProfileToString(buf.data(), TEXT("execGetV10Key"), TEXT(""));
 	s_.channelsUri			= TStringToPrintableAsciiString(GetBufferedProfileToString(buf.data(), TEXT("channelsUri"), TEXT("")).c_str());
+	s_.channelsWsUri		= TStringToPrintableAsciiString(GetBufferedProfileToString(buf.data(), TEXT("channelsWsUri"), TEXT("")).c_str());
 	s_.refugeUri			= TStringToPrintableAsciiString(GetBufferedProfileToString(buf.data(), TEXT("refugeUri"), TEXT("")).c_str());
 	s_.bDropForwardedComment = GetBufferedProfileInt(buf.data(), TEXT("dropForwardedComment"), 0) != 0;
 	s_.bRefugeMixing		= !s_.refugeUri.empty() && GetBufferedProfileInt(buf.data(), TEXT("refugeMixing"), 0) != 0;
@@ -3747,6 +3751,183 @@ void CNicoJK::SendLogWV2AboneUpdate(LPCTSTR marker, bool state)
 	pLogWV2_->PostWebMessageAsString(msg);
 }
 
+// ---- channels WebSocket ヘルパー ----
+
+struct ChannelWsEntry {
+	int  id          = 0;
+	int  force       = -1;
+	bool hasForce    = false;
+	tstring programTitle;
+	bool hasProgramTitle = false; // true = データあり (空文字列 = null)
+};
+struct ChannelWsMsg {
+	int type = 0;  // 1=snapshot  2=stats  3=programs
+	std::vector<ChannelWsEntry> channels;
+};
+
+static int CwsJInt(const std::string& s, const char* key) {
+	std::string nd = std::string("\"") + key + "\":";
+	auto p = s.find(nd);
+	if (p == std::string::npos) return -1;
+	p += nd.size();
+	while (p < s.size() && s[p] == ' ') ++p;
+	if (p >= s.size() || (s[p] != '-' && (s[p] < '0' || s[p] > '9'))) return -1;
+	return std::strtol(s.c_str() + p, nullptr, 10);
+}
+static std::string CwsJStr(const std::string& s, const char* key) {
+	std::string nd = std::string("\"") + key + "\":\"";
+	auto p = s.find(nd);
+	if (p == std::string::npos) return {};
+	p += nd.size();
+	std::string r;
+	for (; p < s.size() && s[p] != '"'; ++p) {
+		if (s[p] == '\\' && p + 1 < s.size()) { ++p; r += s[p]; }
+		else r += s[p];
+	}
+	return r;
+}
+static void ParseChannelWsJson(const std::string& json, ChannelWsMsg& msg)
+{
+	std::string t = CwsJStr(json, "type");
+	if      (t == "snapshot") msg.type = 1;
+	else if (t == "stats")    msg.type = 2;
+	else if (t == "programs") msg.type = 3;
+	else return;
+
+	auto chArr = json.find("\"channels\":");
+	if (chArr == std::string::npos) return;
+	auto aStart = json.find('[', chArr);
+	if (aStart == std::string::npos) return;
+
+	size_t pos = aStart + 1;
+	while (pos < json.size()) {
+		auto oS = json.find('{', pos);
+		if (oS == std::string::npos) break;
+		int depth = 0;
+		size_t oE = oS;
+		for (; oE < json.size(); ++oE) {
+			if      (json[oE] == '{') ++depth;
+			else if (json[oE] == '}' && --depth == 0) break;
+		}
+		if (depth != 0) break;
+
+		std::string obj = json.substr(oS, oE - oS + 1);
+		ChannelWsEntry e;
+		e.id = CwsJInt(obj, "id");
+		if (e.id <= 0) { pos = oE + 1; continue; }
+
+		int force = CwsJInt(obj, "force");
+		if (force >= 0) { e.force = force; e.hasForce = true; }
+
+		auto pPos = obj.find("\"program\":");
+		if (pPos != std::string::npos) {
+			auto vPos = obj.find_first_not_of(" \t\r\n", pPos + 10);
+			if (vPos != std::string::npos) {
+				if (obj.compare(vPos, 4, "null") == 0) {
+					e.hasProgramTitle = true; // null → タイトルなし
+				} else if (obj[vPos] == '{') {
+					int pd = 0; size_t pE = vPos;
+					for (; pE < obj.size(); ++pE) {
+						if      (obj[pE] == '{') ++pd;
+						else if (obj[pE] == '}' && --pd == 0) break;
+					}
+					std::string prog = obj.substr(vPos, pE - vPos + 1);
+					std::string title = CwsJStr(prog, "title");
+					if (!title.empty()) {
+						int wl = MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, nullptr, 0);
+						if (wl > 1) {
+							e.programTitle.resize(wl - 1);
+							MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, &e.programTitle[0], wl);
+						}
+					}
+					e.hasProgramTitle = true;
+				}
+			}
+		}
+
+		msg.channels.push_back(std::move(e));
+		pos = oE + 1;
+	}
+}
+
+void CNicoJK::ChannelWsThreadFunc(HWND hwndForce, std::string wsUri)
+{
+	while (WaitForSingleObject(hChannelWsQuit_, 0) != WAIT_OBJECT_0) {
+		// ws:// → http:// / wss:// → https:// に変換して WinHttpCrackUrl で解析
+		bool isSecure = wsUri.size() >= 6 && wsUri.substr(0, 6) == "wss://";
+		std::string httpUrl = (isSecure ? "https://" : "http://") + wsUri.substr(isSecure ? 6 : 5);
+		std::wstring wUrl(httpUrl.begin(), httpUrl.end());
+
+		URL_COMPONENTS uc = {};
+		uc.dwStructSize = sizeof(uc);
+		wchar_t szHost[256] = {}, szPath[1024] = {};
+		uc.lpszHostName = szHost; uc.dwHostNameLength = _countof(szHost);
+		uc.lpszUrlPath  = szPath; uc.dwUrlPathLength  = _countof(szPath);
+		if (!WinHttpCrackUrl(wUrl.c_str(), 0, 0, &uc)) {
+			if (WaitForSingleObject(hChannelWsQuit_, 10000) == WAIT_OBJECT_0) break;
+			continue;
+		}
+
+		HINTERNET hSession = WinHttpOpen(L"NicoJK",
+		    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+		if (!hSession) { if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break; continue; }
+
+		HINTERNET hConnect = WinHttpConnect(hSession, szHost, uc.nPort, 0);
+		HINTERNET hRequest = hConnect ? WinHttpOpenRequest(hConnect, L"GET", szPath, nullptr,
+		    WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, isSecure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+
+		HINTERNET hWs = nullptr;
+		if (hRequest) {
+			WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
+			if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) &&
+			    WinHttpReceiveResponse(hRequest, nullptr)) {
+				hWs = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
+			}
+			WinHttpCloseHandle(hRequest);
+		}
+		if (!hWs) {
+			if (hConnect) WinHttpCloseHandle(hConnect);
+			WinHttpCloseHandle(hSession);
+			if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break;
+			continue;
+		}
+
+		// 受信ループ: サーバーが stats を定期送信するので最大 statsIntervalSec 後に quit を検知できる
+		std::string jsonBuf;
+		BYTE buf[4096];
+		for (;;) {
+			if (WaitForSingleObject(hChannelWsQuit_, 0) == WAIT_OBJECT_0) {
+				WinHttpWebSocketClose(hWs, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+				break;
+			}
+			DWORD dwRead = 0;
+			WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
+			if (WinHttpWebSocketReceive(hWs, buf, sizeof(buf), &dwRead, &type) != ERROR_SUCCESS) break;
+			if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) break;
+
+			jsonBuf.append(reinterpret_cast<char*>(buf), dwRead);
+
+			if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+				ChannelWsMsg* pMsg = new ChannelWsMsg();
+				ParseChannelWsJson(jsonBuf, *pMsg);
+				if (pMsg->type > 0) {
+					PostMessage(hwndForce, WMS_CHANNEL_WS, pMsg->type, reinterpret_cast<LPARAM>(pMsg));
+				} else {
+					delete pMsg;
+				}
+				jsonBuf.clear();
+			}
+		}
+
+		PostMessage(hwndForce, WMS_CHANNEL_WS, 0, 0); // 切断通知
+		WinHttpCloseHandle(hWs);
+		WinHttpCloseHandle(hConnect);
+		WinHttpCloseHandle(hSession);
+
+		if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break;
+	}
+}
+
 bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 {
 	int dpi = m_pApp->GetDPIFromWindow(hwnd);
@@ -4253,11 +4434,36 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				            return S_OK;
 				        }).Get());
 			}
+
+			// channels WebSocket スレッド起動
+			if (!s_.channelsWsUri.empty()) {
+				hChannelWsQuit_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+				if (hChannelWsQuit_) {
+					channelWsThread_ = std::thread([this, hwnd]() {
+						ChannelWsThreadFunc(hwnd, s_.channelsWsUri);
+					});
+				}
+			}
 			return 0;
 		}
 		return -1;
 	case WM_DESTROY:
 		{
+			// channels WebSocket スレッドを停止
+			if (channelWsThread_.joinable()) {
+				SetEvent(hChannelWsQuit_);
+				channelWsThread_.join();
+				CloseHandle(hChannelWsQuit_);
+				hChannelWsQuit_ = nullptr;
+			}
+			channelWsConnected_ = false;
+			// 未処理の WMS_CHANNEL_WS ポインタを解放
+			{
+				MSG msg;
+				while (PeekMessage(&msg, hwnd, WMS_CHANNEL_WS, WMS_CHANNEL_WS, PM_REMOVE))
+					if (msg.lParam) delete reinterpret_cast<ChannelWsMsg*>(msg.lParam);
+			}
+			programTitleMap_.clear();
 			// 録画状態をチェックするスレッドを終了
 			if (hQuitCheckRecordingEvent_) {
 				SetEvent(hQuitCheckRecordingEvent_);
@@ -4921,11 +5127,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 			}
 			if (!bDisplayLogList_ && IsWindowVisible(hwnd)) {
-				// 勢いを更新する
-				if (!s_.channelsUri.empty() &&
+				// 勢いを更新する (channelsWsUri 接続中は WMS_CHANNEL_WS が担うためポーリング不要)
+				if (!channelWsConnected_ && !s_.channelsUri.empty() &&
 				    channelStream_.Send(hwnd, WMS_FORCE, 'G', s_.channelsUri.c_str())) {
 					channelBuf_.clear();
-				} else {
+				} else if (!channelWsConnected_) {
 					for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
 						// 自力計算による勢い情報を使う
 						it->force = it->jkID == currentJK_ ? currentJKForceByChatCount_ : -1;
@@ -5313,6 +5519,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				ULONGLONG nowTick = GetTickCount64();
 				for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
 					UpdateForceElemEventName(&*it, nowTick);
+					// TVTest EPG が空の場合 channels WebSocket の番組情報で補完
+					if (it->eventName.empty() && !programTitleMap_.empty()) {
+						auto pit = programTitleMap_.find(it->jkID);
+						if (pit != programTitleMap_.end() && !pit->second.empty())
+							it->eventName = pit->second;
+					}
 					TCHAR text[256];
 					TCHAR fixedText[16];
 					tstring eventText = it->eventName.empty() ? tstring() : tstring(TEXT(" ")) + it->eventName;
@@ -5385,6 +5597,37 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 				SendMessage(hwnd, WM_UPDATE_LIST, 2, 0);
 			}
+		}
+		return TRUE;
+	case WMS_CHANNEL_WS:
+		{
+			if (!wParam) {
+				// 切断通知
+				channelWsConnected_ = false;
+				break;
+			}
+			ChannelWsMsg* pMsg = reinterpret_cast<ChannelWsMsg*>(lParam);
+			if (!pMsg) break;
+			for (const auto& ch : pMsg->channels) {
+				// 勢い値を更新
+				if (ch.hasForce) {
+					auto it = LowerBoundJKID(forceList_.begin(), forceList_.end(), ch.id);
+					if (it != forceList_.end() && it->jkID == ch.id)
+						it->force = ch.force;
+				}
+				// 番組タイトルを更新
+				if (ch.hasProgramTitle) {
+					if (!ch.programTitle.empty())
+						programTitleMap_[ch.id] = ch.programTitle;
+					else
+						programTitleMap_.erase(ch.id); // null
+				}
+			}
+			if (pMsg->type == 1) // snapshot 受信で接続確立とみなす
+				channelWsConnected_ = true;
+			delete pMsg;
+			if (!bDisplayLogList_ && IsWindowVisible(hwnd))
+				SendMessage(hwnd, WM_UPDATE_LIST, 2, 0);
 		}
 		return TRUE;
 	case WMS_JK:
