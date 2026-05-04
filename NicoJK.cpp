@@ -3668,8 +3668,10 @@ std::wstring CNicoJK::LogElemToJson(const LOG_ELEM& e) const
 	if (!wcsncmp(mk, L"a:", 2)) mk += 2;
 	wchar_t tm[12];
 	swprintf_s(tm, L"%02d:%02d:%02d", e.st.wHour, e.st.wMinute, e.st.wSecond);
+	// WM_DRAWITEM(line 4519): bEmphasis(#プレフィックス=MSG型) のとき RGB(0xFF,0,0) で描画
+	COLORREF cr = (e.type == LOG_ELEM_TYPE_MESSAGE) ? RGB(0xFF, 0, 0) : e.cr;
 	return std::wstring(L"{\"tx\":\"") + LogJsonEsc(e.text.c_str())
-	     + L"\",\"cl\":\"" + LogColorToHex(e.cr)
+	     + L"\",\"cl\":\"" + LogColorToHex(cr)
 	     + L"\",\"mc\":\"" + LogColorToHex(crM)
 	     + L"\",\"tp\":\"" + tp
 	     + L"\",\"m\":\""  + LogJsonEsc(mk)
