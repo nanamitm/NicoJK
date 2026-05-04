@@ -3920,14 +3920,13 @@ void CNicoJK::ChannelWsThreadFunc(HWND hwndForce, std::string wsUri)
 			continue;
 		}
 
-		// 受信ループ: サーバーが stats を定期送信するので最大 statsIntervalSec 後に quit を検知できる
+		// hWs を共有メンバーに登録: メインスレッドが終了時に WinHttpCloseHandle で受信を即中断できる
+		InterlockedExchangePointer(&hChannelWsHandle_, hWs);
+
 		std::string jsonBuf;
 		BYTE buf[4096];
 		for (;;) {
-			if (WaitForSingleObject(hChannelWsQuit_, 0) == WAIT_OBJECT_0) {
-				WinHttpWebSocketClose(hWs, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
-				break;
-			}
+			if (WaitForSingleObject(hChannelWsQuit_, 0) == WAIT_OBJECT_0) break;
 			DWORD dwRead = 0;
 			WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
 			if (WinHttpWebSocketReceive(hWs, buf, sizeof(buf), &dwRead, &type) != ERROR_SUCCESS) break;
@@ -3948,7 +3947,8 @@ void CNicoJK::ChannelWsThreadFunc(HWND hwndForce, std::string wsUri)
 		}
 
 		PostMessage(hwndForce, WMS_CHANNEL_WS, 0, 0); // 切断通知
-		WinHttpCloseHandle(hWs);
+		// InterlockedExchange でハンドルの所有権を確認: nullptr ならメインスレッドが既に Close 済み
+		if (InterlockedExchangePointer(&hChannelWsHandle_, nullptr)) WinHttpCloseHandle(hWs);
 		WinHttpCloseHandle(hConnect);
 		WinHttpCloseHandle(hSession);
 
@@ -4480,6 +4480,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			// channels WebSocket スレッドを停止
 			if (channelWsThread_.joinable()) {
 				SetEvent(hChannelWsQuit_);
+				// 受信中なら WinHttpCloseHandle で WinHttpWebSocketReceive を即中断
+				PVOID h = InterlockedExchangePointer(&hChannelWsHandle_, nullptr);
+				if (h) WinHttpCloseHandle(static_cast<HINTERNET>(h));
 				channelWsThread_.join();
 				CloseHandle(hChannelWsQuit_);
 				hChannelWsQuit_ = nullptr;
