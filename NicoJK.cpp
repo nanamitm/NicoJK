@@ -5551,14 +5551,20 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
 					UpdateForceElemEventName(&*it, nowTick);
 					// TVTest EPG が空の場合 channels WebSocket の番組情報で補完
+					// programTitleMap_ の値は表示専用: it->eventName に書き戻すと次回レンダリング時に
+					// 古いタイトルが残り programs 更新が反映されなくなるため pEventName で参照する
+					const tstring* pEventName = &it->eventName;
+					tstring wsEventName;
 					if (it->eventName.empty() && !programTitleMap_.empty()) {
 						auto pit = programTitleMap_.find(it->jkID);
-						if (pit != programTitleMap_.end() && !pit->second.empty())
-							it->eventName = pit->second;
+						if (pit != programTitleMap_.end() && !pit->second.empty()) {
+							wsEventName = pit->second;
+							pEventName = &wsEventName;
+						}
 					}
 					TCHAR text[256];
 					TCHAR fixedText[16];
-					tstring eventText = it->eventName.empty() ? tstring() : tstring(TEXT(" ")) + it->eventName;
+					tstring eventText = pEventName->empty() ? tstring() : tstring(TEXT(" ")) + *pEventName;
 					eventText.resize(min<size_t>(eventText.size(), 63));
 					if (it->force < 0) {
 						_stprintf_s(fixedText, TEXT("%03d 勢???"), it->jkID);
