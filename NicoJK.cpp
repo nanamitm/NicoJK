@@ -122,9 +122,7 @@ const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
 enum {
 	IDC_COMMENT_EDIT = 3001,
 	IDC_COMMENT_SEND = 3002,
-	IDC_COMMENT_DECO_FIRST = 3010,
 };
-const int IDC_COMMENT_DECO_MAX = 20;
 
 enum {
 	IDC_LOGIN_MAIL = 2001,
@@ -378,7 +376,6 @@ CNicoJK::CNicoJK()
 	, hLoginLastLogin_(nullptr)
 	, hCommentWindow_(nullptr)
 	, hCommentEdit_(nullptr)
-	, commentDecoCount_(0)
 	, hbrForcePostEditBox_(nullptr)
 	, hForceFont_(nullptr)
 	, pDWriteFactory_(nullptr)
@@ -3215,36 +3212,114 @@ LRESULT CALLBACK CNicoJK::CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
 
 static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
 {
+	wchar_t szFontSize[16];
+	swprintf_s(szFontSize, L"%dpt", fontSize);
+
 	std::wstring html =
-		L"<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><style>"
+		L"<!DOCTYPE html><html><head><meta charset='UTF-8'><style>"
 		L"*{margin:0;padding:0;box-sizing:border-box}"
-		L"html,body{width:100%;height:100%;overflow:hidden;background:#ffffff}"
-		L"#c{display:block;width:100%;height:100%;border:none;outline:none;"
+		L"html,body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;"
+		L"background:var(--bg,#fff);color:var(--fg,#000);"
 		L"font-family:'Segoe UI Emoji','";
 	html += fontName;
-	wchar_t szSize[32];
-	swprintf_s(szSize, L"',sans-serif;font-size:%dpt;", fontSize);
-	html += szSize;
+	html += L"',sans-serif;font-size:";
+	html += szFontSize;
 	html +=
-		L"padding:2px 6px;background:transparent;color:#000000}"
+		L"}"
+		// ツールバー行
+		L"#tb{display:flex;align-items:center;gap:3px;padding:4px 5px 2px;flex-shrink:0;overflow:hidden}"
+		// 色ボタン（円形）
+		L".cc{width:16px;height:16px;border-radius:50%;cursor:pointer;flex-shrink:0;border:2px solid transparent}"
+		L".cc.on{box-shadow:0 0 0 2px var(--fg,#000)}"
+		L".c0{background:#fff;border-color:#aaa}"   // 白
+		L".c1{background:#e00}"                      // 赤
+		L".c2{background:#f7a}"                      // ピンク
+		L".c3{background:#f80}"                      // 橙
+		L".c4{background:#fd0}"                      // 黄
+		L".c5{background:#0b0}"                      // 緑
+		L".c6{background:#0cc}"                      // 水色
+		L".c7{background:#00e}"                      // 青
+		L".c8{background:#808}"                      // 紫
+		L".c9{background:#222}"                      // 黒
+		// 区切り線
+		L".sp{width:1px;height:14px;background:var(--fg,#000);opacity:0.25;flex-shrink:0}"
+		// 位置・サイズ トグルボタン
+		L".tb{flex-shrink:0;padding:0 5px;height:17px;line-height:17px;"
+		L"border:1px solid var(--fg,#000);border-radius:3px;cursor:pointer;"
+		L"background:transparent;color:var(--fg,#000);font-size:9pt;opacity:0.6}"
+		L".tb.on{background:var(--fg,#000);color:var(--bg,#fff);opacity:1}"
+		// 入力欄
+		L"#ir{flex:1;padding:2px 4px 4px;min-height:0}"
+		L"#c{display:block;width:100%;height:100%;"
+		L"border:1px solid rgba(128,128,128,0.5);border-radius:3px;"
+		L"padding:1px 5px;background:transparent;color:inherit;"
+		L"outline:none;font-family:inherit;font-size:inherit}"
 		L"</style></head><body>"
-		L"<input id=\"c\" type=\"text\" maxlength=\"75\">"
+		L"<div id='tb'>"
+		// 色ボタン: 白(デフォルト)/赤/ピンク/橙/黄/緑/水色/青/紫/黒
+		L"<div class='cc c0 on' data-c='' title='白'></div>"
+		L"<div class='cc c1' data-c='red' title='赤'></div>"
+		L"<div class='cc c2' data-c='pink' title='ピンク'></div>"
+		L"<div class='cc c3' data-c='orange' title='橙'></div>"
+		L"<div class='cc c4' data-c='yellow' title='黄'></div>"
+		L"<div class='cc c5' data-c='green' title='緑'></div>"
+		L"<div class='cc c6' data-c='cyan' title='水色'></div>"
+		L"<div class='cc c7' data-c='blue' title='青'></div>"
+		L"<div class='cc c8' data-c='purple' title='紫'></div>"
+		L"<div class='cc c9' data-c='black' title='黒'></div>"
+		// 位置ボタン
+		L"<div class='sp'></div>"
+		L"<button class='tb on' data-p=''>流</button>"
+		L"<button class='tb' data-p='ue'>上</button>"
+		L"<button class='tb' data-p='shita'>下</button>"
+		// サイズボタン
+		L"<div class='sp'></div>"
+		L"<button class='tb' data-s='big'>大</button>"
+		L"<button class='tb on' data-s=''>普</button>"
+		L"<button class='tb' data-s='small'>小</button>"
+		L"</div>"
+		L"<div id='ir'><input id='c' type='text' maxlength='75'></div>"
 		L"<script>"
+		// ツールバーのクリックで入力欄からフォーカスが外れないよう mousedown を抑制
+		L"document.getElementById('tb').addEventListener('mousedown',function(e){e.preventDefault();});"
+		// 選択状態
+		L"var sc='',sp='',ss='';"
+		// 色ボタン
+		L"var cbs=[...document.querySelectorAll('[data-c]')];"
+		L"cbs.forEach(function(b){b.addEventListener('click',function(){"
+		L"sc=b.dataset.c;"
+		L"cbs.forEach(function(x){x.classList.toggle('on',x.dataset.c===sc);});});});"
+		// 位置ボタン
+		L"var pbs=[...document.querySelectorAll('[data-p]')];"
+		L"pbs.forEach(function(b){b.addEventListener('click',function(){"
+		L"sp=b.dataset.p;"
+		L"pbs.forEach(function(x){x.classList.toggle('on',x.dataset.p===sp);});});});"
+		// サイズボタン
+		L"var sbs=[...document.querySelectorAll('[data-s]')];"
+		L"sbs.forEach(function(b){b.addEventListener('click',function(){"
+		L"ss=b.dataset.s;"
+		L"sbs.forEach(function(x){x.classList.toggle('on',x.dataset.s===ss);});});});"
+		// Enter で投稿: postMessage("cmd\ntext") 形式
 		L"var c=document.getElementById('c');"
 		L"c.addEventListener('keydown',function(e){"
-		L"  if(e.key==='Enter'&&!e.isComposing){"
-		L"    if(c.value)window.chrome.webview.postMessage(c.value);"
-		L"    e.preventDefault();"
-		L"  }"
-		L"});"
+		L"if(e.key==='Enter'&&!e.isComposing){"
+		L"if(c.value){"
+		L"var cmd=[sc,sp,ss].filter(Boolean).join(' ');"
+		L"window.chrome.webview.postMessage(cmd+'\\n'+c.value);"
+		L"}"
+		L"e.preventDefault();"
+		L"}});"
+		// C++ → JS メッセージ受信
 		L"window.chrome.webview.addEventListener('message',function(e){"
-		L"  if(e.data==='clear'){c.value='';}"
-		L"  else if(e.data==='focus'){c.focus();}"
-		L"  else if(e.data.startsWith('theme:')){"
-		L"    var p=e.data.slice(6).split(',');"
-		L"    document.body.style.background=p[0];c.style.color=p[1];"
-		L"  }"
-		L"});"
+		L"if(e.data==='clear'){c.value='';}"
+		L"else if(e.data==='focus'){c.focus();}"
+		L"else if(e.data.startsWith('theme:')){"
+		L"var p=e.data.slice(6).split(',');"
+		L"document.documentElement.style.setProperty('--bg',p[0]);"
+		L"document.documentElement.style.setProperty('--fg',p[1]);"
+		L"document.body.style.background=p[0];"
+		L"document.body.style.color=p[1];"
+		L"}});"
 		L"</script></body></html>";
 	return html;
 }
@@ -3256,38 +3331,6 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
 		if (!pThis) return 0;
 		pThis->hCommentWindow_ = hwnd;
-		// 装飾ラジオボタン (mailDecorations から生成、空エントリは "なし" として重複除外)
-		pThis->commentDecoCount_ = 0;
-		int noneIdx = -1;
-		bool noneCreated = false;
-		for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p && pThis->commentDecoCount_ < IDC_COMMENT_DECO_MAX; ) {
-			size_t len = _tcscspn(p, TEXT(":"));
-			TCHAR label[64];
-			if (len == 0) {
-				if (noneCreated) { p += p[len] ? len + 1 : len; continue; } // 重複 "なし" をスキップ
-				_tcscpy_s(label, TEXT("なし"));
-				noneIdx = pThis->commentDecoCount_;
-				noneCreated = true;
-			} else {
-				_tcsncpy_s(label, p, min<size_t>(len, 63));
-				label[min<size_t>(len, 63)] = TEXT('\0');
-			}
-			DWORD style = WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON;
-			if (pThis->commentDecoCount_ == 0) style |= WS_GROUP;
-			CreateWindowEx(0, TEXT("BUTTON"), label, style,
-			    0, 0, 0, 0, hwnd,
-			    reinterpret_cast<HMENU>(IDC_COMMENT_DECO_FIRST + pThis->commentDecoCount_),
-			    g_hinstDLL, nullptr);
-			++pThis->commentDecoCount_;
-			p += p[len] ? len + 1 : len;
-		}
-		// デフォルトは "なし"（空エントリ）。なければ先頭を選択
-		CheckDlgButton(hwnd, IDC_COMMENT_DECO_FIRST + (noneIdx >= 0 ? noneIdx : 0), BST_CHECKED);
-		HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-		for (int i = 0; i < pThis->commentDecoCount_; ++i) {
-			HWND h = GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i);
-			if (h) SendMessage(h, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
-		}
 
 		// WebView2 非同期作成
 		// ユーザーデータフォルダ: NicoJK.ini と同じディレクトリに _webview2 サフィックスで作成
@@ -3389,24 +3432,14 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			GetClientRect(hwnd, &rc);
 			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
 			if (dpi == 0) dpi = 96;
-			int margin = 8 * dpi / 96;
-			int gap    = 4 * dpi / 96;
-			int radioH = 20 * dpi / 96;
-			int editH  = 22 * dpi / 96;
-			// 入力欄
+			int margin = 6 * dpi / 96;
+			int editH  = 24 * dpi / 96;
 			if (pThis->pWV2Controller_ && pThis->wv2Ready_) {
-				RECT wv2Rect = { margin, margin, rc.right - margin, margin + editH };
+				// ツールバー+入力欄を含む HTML が全面を使う
+				RECT wv2Rect = { 0, 0, rc.right, rc.bottom };
 				pThis->pWV2Controller_->put_Bounds(wv2Rect);
 			} else if (HWND hEdit = GetDlgItem(hwnd, IDC_COMMENT_EDIT)) {
 				MoveWindow(hEdit, margin, margin, rc.right - margin * 2, editH, TRUE);
-			}
-			// ラジオボタンを下段に全幅配置
-			int rowY = margin + editH + gap;
-			int radioAreaW = rc.right - margin * 2;
-			int radioW = pThis->commentDecoCount_ > 0 ? radioAreaW / pThis->commentDecoCount_ : radioAreaW;
-			for (int i = 0; i < pThis->commentDecoCount_; ++i) {
-				MoveWindow(GetDlgItem(hwnd, IDC_COMMENT_DECO_FIRST + i),
-				    margin + i * radioW, rowY, radioW, radioH, TRUE);
 			}
 		}
 		return 0;
@@ -3417,23 +3450,7 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			if (len <= 0) break;
 			std::vector<TCHAR> text(len + 1);
 			GetWindowText(pThis->hCommentEdit_, text.data(), len + 1);
-			int decoIdx = 0;
-			for (int i = 0; i < pThis->commentDecoCount_; ++i) {
-				if (IsDlgButtonChecked(hwnd, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
-					decoIdx = i; break;
-				}
-			}
-			TCHAR deco[64] = {};
-			int idx = 0;
-			for (LPCTSTR p = pThis->s_.mailDecorations.c_str(); *p; ) {
-				size_t slen = _tcscspn(p, TEXT(":"));
-				if (idx == decoIdx) { _tcsncpy_s(deco, p, min<size_t>(slen, 63)); break; }
-				++idx;
-				p += p[slen] ? slen + 1 : slen;
-			}
-			TCHAR full[POST_COMMENT_MAX + 64];
-			_stprintf_s(full, TEXT("%s%s"), deco, text.data());
-			SetDlgItemText(pThis->hForce_, IDC_CB_POST, full);
+			SetDlgItemText(pThis->hForce_, IDC_CB_POST, text.data());
 			SendMessage(pThis->hForce_, WM_POST_COMMENT, 0, 0);
 			SetWindowText(pThis->hCommentEdit_, TEXT(""));
 		}
@@ -3483,11 +3500,8 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			RECT *pr = reinterpret_cast<RECT*>(lParam);
 			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
 			if (dpi == 0) dpi = 96;
-			int margin = 8 * dpi / 96;
-			int gap    = 4 * dpi / 96;
-			int editH  = 22 * dpi / 96;
-			int radioH = 20 * dpi / 96;
-			int clientH = margin + editH + gap + radioH + margin;
+			// ツールバー行(22) + 入力行(22) + パディング合計(18) = 62px
+			int clientH = 62 * dpi / 96;
 			RECT rcAdj = { 0, 0, 0, clientH };
 			AdjustWindowRectEx(&rcAdj, static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_STYLE)), FALSE,
 			    static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_EXSTYLE)));
@@ -3518,26 +3532,17 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 	return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-void CNicoJK::OnWV2CommentSend(HWND hwndComment, LPCWSTR text)
+void CNicoJK::OnWV2CommentSend(HWND hwndComment, LPCWSTR msg)
 {
-	if (!text || !text[0] || !hForce_) return;
-	int decoIdx = 0;
-	for (int i = 0; i < commentDecoCount_; ++i) {
-		if (IsDlgButtonChecked(hwndComment, IDC_COMMENT_DECO_FIRST + i) == BST_CHECKED) {
-			decoIdx = i; break;
-		}
-	}
-	TCHAR deco[64] = {};
-	int idx = 0;
-	for (LPCTSTR p = s_.mailDecorations.c_str(); *p; ) {
-		size_t slen = _tcscspn(p, TEXT(":"));
-		if (idx == decoIdx) { _tcsncpy_s(deco, p, min<size_t>(slen, 63)); break; }
-		++idx;
-		p += p[slen] ? slen + 1 : slen;
-	}
-	TCHAR full[POST_COMMENT_MAX + 64];
-	_stprintf_s(full, TEXT("%s%s"), deco, text);
-	SetDlgItemText(hForce_, IDC_CB_POST, full);
+	// JS から "cmd\ntext" 形式で受信する (cmd は "red ue big" のようなスペース区切り、空文字可)
+	// GetPostComboBoxText は "[cmd]text" を mail="cmd", comm="text" に分解する
+	if (!msg || !hForce_) return;
+	const wchar_t* nl = wcschr(msg, L'\n');
+	const wchar_t* text = nl ? nl + 1 : msg;
+	if (!text[0]) return;
+	std::wstring cmd = nl ? std::wstring(msg, nl) : L"";
+	std::wstring full = cmd.empty() ? text : (L"[" + cmd + L"]" + text);
+	SetDlgItemText(hForce_, IDC_CB_POST, full.c_str());
 	SendMessage(hForce_, WM_POST_COMMENT, 0, 0);
 	if (pWV2_) pWV2_->PostWebMessageAsString(L"clear");
 }
@@ -4176,11 +4181,6 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		BOOL bDarkBool = bDark ? TRUE : FALSE;
 		::DwmSetWindowAttribute(hCommentWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
 		SetWindowTheme(hCommentWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-		for (int i = 0; i < commentDecoCount_; ++i) {
-			HWND h = GetDlgItem(hCommentWindow_, IDC_COMMENT_DECO_FIRST + i);
-			// Visual Styles を外してGDI描画にすることでWM_CTLCOLORBTNのテキスト色を有効にする
-			if (h) SetWindowTheme(h, L"", L"");
-		}
 		if (hCommentEdit_) {
 			SendMessage(hCommentEdit_, EM_SETBKGNDCOLOR, bDark ? 0 : 1, panelColor_.GetPanelBack());
 			if (bDark) {
