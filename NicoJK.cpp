@@ -115,6 +115,11 @@ const UINT WM_TOGGLE_LOG_LIST_NG = WM_APP + 109;
 const UINT WM_GET_LOG_LIST_NG_STATE = WM_APP + 110;
 const UINT WMS_LOGIN_SETTINGS = WM_APP + 111;
 const UINT WMS_CHANNEL_WS    = WM_APP + 113;
+const UINT WMS_COMMENT_POPUP = WM_APP + 114;
+
+// コメントウィンドウ行高（CSS px）: ポップアップ 28px + 入力行 34px = 62px
+static const int COMMENT_POPUP_CSS_H = 28;
+static const int COMMENT_BASE_CSS_H  = 34;
 
 const UINT ID_FORCE_LIST_COPY = 1;
 const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
@@ -3218,7 +3223,7 @@ static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
 	std::wstring html =
 		L"<!DOCTYPE html><html><head><meta charset='UTF-8'><style>"
 		L"*{margin:0;padding:0;box-sizing:border-box}"
-		L"html,body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;"
+		L"html,body{width:100%;height:100%;overflow:hidden;position:relative;"
 		L"background:var(--bg,#fff);color:var(--fg,#000);"
 		L"font-family:'Segoe UI Emoji','";
 	html += fontName;
@@ -3226,37 +3231,47 @@ static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
 	html += szFontSize;
 	html +=
 		L"}"
-		// ツールバー行
-		L"#tb{display:flex;align-items:center;gap:3px;padding:4px 5px 2px;flex-shrink:0;overflow:hidden}"
+		// ポップアップパネル（上部絶対配置、ウィンドウ展開時のみ表示）
+		L"#pp{position:absolute;top:0;left:0;right:0;height:28px;"
+		L"display:flex;align-items:center;gap:3px;padding:0 5px;"
+		L"border-bottom:1px solid rgba(128,128,128,0.3);visibility:hidden}"
 		// 色ボタン（円形）
 		L".cc{width:16px;height:16px;border-radius:50%;cursor:pointer;flex-shrink:0;border:2px solid transparent}"
 		L".cc.on{box-shadow:0 0 0 2px var(--fg,#000)}"
-		L".c0{background:#fff;border-color:#aaa}"   // 白
-		L".c1{background:#e00}"                      // 赤
-		L".c2{background:#f7a}"                      // ピンク
-		L".c3{background:#f80}"                      // 橙
-		L".c4{background:#fd0}"                      // 黄
-		L".c5{background:#0b0}"                      // 緑
-		L".c6{background:#0cc}"                      // 水色
-		L".c7{background:#00e}"                      // 青
-		L".c8{background:#808}"                      // 紫
-		L".c9{background:#222}"                      // 黒
+		L".c0{background:#fff;border-color:#aaa}"
+		L".c1{background:#e00}"
+		L".c2{background:#f7a}"
+		L".c3{background:#f80}"
+		L".c4{background:#fd0}"
+		L".c5{background:#0b0}"
+		L".c6{background:#0cc}"
+		L".c7{background:#00e}"
+		L".c8{background:#808}"
+		L".c9{background:#222}"
 		// 区切り線
 		L".sp{width:1px;height:14px;background:var(--fg,#000);opacity:0.25;flex-shrink:0}"
 		// 位置・サイズ トグルボタン
-		L".tb{flex-shrink:0;padding:0 5px;height:17px;line-height:17px;"
+		L".tb{flex-shrink:0;padding:0 4px;height:16px;line-height:16px;"
 		L"border:1px solid var(--fg,#000);border-radius:3px;cursor:pointer;"
 		L"background:transparent;color:var(--fg,#000);font-size:9pt;opacity:0.6}"
 		L".tb.on{background:var(--fg,#000);color:var(--bg,#fff);opacity:1}"
-		// 入力欄
-		L"#ir{flex:1;padding:2px 4px 4px;min-height:0}"
-		L"#c{display:block;width:100%;height:100%;"
-		L"border:1px solid rgba(128,128,128,0.5);border-radius:3px;"
+		// メイン行（コマンドボタン + 入力欄、下部絶対固定）
+		L"#mn{position:absolute;bottom:0;left:0;right:0;height:34px;"
+		L"display:flex;align-items:center;padding:3px 5px;gap:4px;z-index:1}"
+		// コマンドボタン（選択状態を三角文字+色で表示）
+		L"#cb{flex-shrink:0;width:26px;height:27px;"
+		L"border:1px solid rgba(128,128,128,0.6);border-radius:4px;"
+		L"cursor:pointer;background:transparent;color:inherit;"
+		L"font-size:13pt;line-height:1;font-family:inherit;"
+		L"display:flex;align-items:center;justify-content:center}"
+		L"#cb.open{background:rgba(128,128,128,0.15)}"
+		// テキスト入力欄
+		L"#c{flex:1;height:27px;border:1px solid rgba(128,128,128,0.5);border-radius:3px;"
 		L"padding:1px 5px;background:transparent;color:inherit;"
 		L"outline:none;font-family:inherit;font-size:inherit}"
 		L"</style></head><body>"
-		L"<div id='tb'>"
-		// 色ボタン: 白(デフォルト)/赤/ピンク/橙/黄/緑/水色/青/紫/黒
+		// ポップアップ（上部、ウィンドウ展開時のみ見える）
+		L"<div id='pp'>"
 		L"<div class='cc c0 on' data-c='' title='白'></div>"
 		L"<div class='cc c1' data-c='red' title='赤'></div>"
 		L"<div class='cc c2' data-c='pink' title='ピンク'></div>"
@@ -3267,40 +3282,72 @@ static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
 		L"<div class='cc c7' data-c='blue' title='青'></div>"
 		L"<div class='cc c8' data-c='purple' title='紫'></div>"
 		L"<div class='cc c9' data-c='black' title='黒'></div>"
-		// 位置ボタン
 		L"<div class='sp'></div>"
 		L"<button class='tb on' data-p=''>流</button>"
 		L"<button class='tb' data-p='ue'>上</button>"
 		L"<button class='tb' data-p='shita'>下</button>"
-		// サイズボタン
 		L"<div class='sp'></div>"
 		L"<button class='tb' data-s='big'>大</button>"
 		L"<button class='tb on' data-s=''>普</button>"
 		L"<button class='tb' data-s='small'>小</button>"
 		L"</div>"
-		L"<div id='ir'><input id='c' type='text' maxlength='75'></div>"
+		// メイン行（常時表示）
+		L"<div id='mn'>"
+		L"<button id='cb' title='コマンド選択'>▷</button>"
+		L"<input id='c' type='text' maxlength='75'>"
+		L"</div>"
 		L"<script>"
-		// ツールバーのクリックで入力欄からフォーカスが外れないよう mousedown を抑制
-		L"document.getElementById('tb').addEventListener('mousedown',function(e){e.preventDefault();});"
-		// 選択状態
-		L"var sc='',sp='',ss='';"
+		// 三角文字マッピング: TR[位置][サイズ]
+		L"var TR={'':{'':'▷','big':'▶','small':'▹'},"
+		L"'ue':{'':'△','big':'▲','small':'▵'},"
+		L"'shita':{'':'▽','big':'▼','small':'▿'}};"
+		// 色のCSS値 (空文字=テーマ色をそのまま使用)
+		L"var CL={'':'','red':'#d00','pink':'#e88','orange':'#e70',"
+		L"'yellow':'#b90','green':'#090','cyan':'#088',"
+		L"'blue':'#00b','purple':'#707','black':'#555'};"
+		// 選択状態・ポップアップ開閉フラグ
+		L"var sc='',sp='',ss='',po=false;"
+		L"var cb=document.getElementById('cb');"
+		L"var c=document.getElementById('c');"
+		L"var pp=document.getElementById('pp');"
+		// コマンドボタン表示更新: 三角文字+文字色+枠色を選択状態に連動
+		L"function upd(){"
+		L"cb.textContent=TR[sp][ss];"
+		L"var col=CL[sc];"
+		L"cb.style.color=col||'';"
+		L"cb.style.borderColor=col?col+'99':'';"
+		L"}"
+		// ポップアップ開閉トグル
+		L"function tog(){"
+		L"po=!po;"
+		L"cb.classList.toggle('open',po);"
+		L"if(!po){pp.style.visibility='hidden';}"  // 閉じる際は即非表示
+		L"window.chrome.webview.postMessage(po?'popup:1':'popup:0');"
+		L"}"
+		// コマンドボタンクリック: フォーカスを奪わず開閉
+		L"cb.addEventListener('mousedown',function(e){e.preventDefault();});"
+		L"cb.addEventListener('click',tog);"
+		// ポップアップ内クリックでもフォーカスを奪わない
+		L"pp.addEventListener('mousedown',function(e){e.preventDefault();});"
 		// 色ボタン
 		L"var cbs=[...document.querySelectorAll('[data-c]')];"
 		L"cbs.forEach(function(b){b.addEventListener('click',function(){"
 		L"sc=b.dataset.c;"
-		L"cbs.forEach(function(x){x.classList.toggle('on',x.dataset.c===sc);});});});"
+		L"cbs.forEach(function(x){x.classList.toggle('on',x.dataset.c===sc);});"
+		L"upd();});});"
 		// 位置ボタン
 		L"var pbs=[...document.querySelectorAll('[data-p]')];"
 		L"pbs.forEach(function(b){b.addEventListener('click',function(){"
 		L"sp=b.dataset.p;"
-		L"pbs.forEach(function(x){x.classList.toggle('on',x.dataset.p===sp);});});});"
+		L"pbs.forEach(function(x){x.classList.toggle('on',x.dataset.p===sp);});"
+		L"upd();});});"
 		// サイズボタン
 		L"var sbs=[...document.querySelectorAll('[data-s]')];"
 		L"sbs.forEach(function(b){b.addEventListener('click',function(){"
 		L"ss=b.dataset.s;"
-		L"sbs.forEach(function(x){x.classList.toggle('on',x.dataset.s===ss);});});});"
-		// Enter で投稿: postMessage("cmd\ntext") 形式
-		L"var c=document.getElementById('c');"
+		L"sbs.forEach(function(x){x.classList.toggle('on',x.dataset.s===ss);});"
+		L"upd();});});"
+		// Enter で投稿: "cmd\ntext" 形式
 		L"c.addEventListener('keydown',function(e){"
 		L"if(e.key==='Enter'&&!e.isComposing){"
 		L"if(c.value){"
@@ -3309,10 +3356,16 @@ static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
 		L"}"
 		L"e.preventDefault();"
 		L"}});"
+		// 入力欄フォーカス時にポップアップを閉じる
+		L"c.addEventListener('focus',function(){"
+		L"if(po){po=false;cb.classList.remove('open');"
+		L"pp.style.visibility='hidden';"
+		L"window.chrome.webview.postMessage('popup:0');}});"
 		// C++ → JS メッセージ受信
 		L"window.chrome.webview.addEventListener('message',function(e){"
 		L"if(e.data==='clear'){c.value='';}"
 		L"else if(e.data==='focus'){c.focus();}"
+		L"else if(e.data==='popup_ready'){pp.style.visibility='visible';}"
 		L"else if(e.data.startsWith('theme:')){"
 		L"var p=e.data.slice(6).split(',');"
 		L"document.documentElement.style.setProperty('--bg',p[0]);"
@@ -3320,6 +3373,7 @@ static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
 		L"document.body.style.background=p[0];"
 		L"document.body.style.color=p[1];"
 		L"}});"
+		L"upd();"  // 初期ボタン表示
 		L"</script></body></html>";
 	return html;
 }
@@ -3380,14 +3434,19 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		                            settings->put_AreDevToolsEnabled(FALSE);
 		                        }
 
-		                        // Enter キー入力 (JS → C++) の受信ハンドラ
+		                        // JS → C++ メッセージ受信ハンドラ
 		                        pThis->pWV2_->add_WebMessageReceived(
 		                            Callback<ICoreWebView2WebMessageReceivedEventHandler>(
 		                                [pThis, hwndCap](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
 		                                    LPWSTR msg = nullptr;
 		                                    args->TryGetWebMessageAsString(&msg);
-		                                    if (msg && msg[0] && IsWindow(hwndCap)) {
-		                                        pThis->OnWV2CommentSend(hwndCap, msg);
+		                                    if (msg && IsWindow(hwndCap)) {
+		                                        if (wcscmp(msg, L"popup:1") == 0)
+		                                            PostMessage(hwndCap, WMS_COMMENT_POPUP, 1, 0);
+		                                        else if (wcscmp(msg, L"popup:0") == 0)
+		                                            PostMessage(hwndCap, WMS_COMMENT_POPUP, 0, 0);
+		                                        else if (msg[0] && wcschr(msg, L'\n'))
+		                                            pThis->OnWV2CommentSend(hwndCap, msg);
 		                                    }
 		                                    CoTaskMemFree(msg);
 		                                    return S_OK;
@@ -3494,14 +3553,44 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			return reinterpret_cast<LRESULT>(pThis->panelColor_.GetPanelBackBrush());
 		}
 		break;
+	case WMS_COMMENT_POPUP:
+		// JS からのポップアップ開閉要求: ウィンドウを上方向に拡縮する
+		if (pThis) {
+			bool open = (wParam != 0);
+			if (open == pThis->commentPopupOpen_) break;
+			pThis->commentPopupOpen_ = open;
+			RECT rc;
+			GetWindowRect(hwnd, &rc);
+			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
+			if (dpi == 0) dpi = 96;
+			int popupH = COMMENT_POPUP_CSS_H * dpi / 96;
+			if (open) {
+				// 上方向に展開: top を popupH 分上げ、height を popupH 分増やす
+				SetWindowPos(hwnd, nullptr,
+				    rc.left, rc.top - popupH,
+				    rc.right - rc.left, rc.bottom - rc.top + popupH,
+				    SWP_NOZORDER);
+				// 展開完了を JS に通知 → JS が #pp を表示する
+				if (pThis->pWV2_ && pThis->wv2Ready_)
+					pThis->pWV2_->PostWebMessageAsString(L"popup_ready");
+			} else {
+				// 上方向に縮小: top を popupH 分下げ、height を popupH 分減らす
+				SetWindowPos(hwnd, nullptr,
+				    rc.left, rc.top + popupH,
+				    rc.right - rc.left, rc.bottom - rc.top - popupH,
+				    SWP_NOZORDER);
+			}
+		}
+		return 0;
 	case WM_SIZING:
 		// 縦サイズを固定：ドラッグ中に高さを補正
 		if (pThis) {
 			RECT *pr = reinterpret_cast<RECT*>(lParam);
 			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
 			if (dpi == 0) dpi = 96;
-			// ツールバー行(22) + 入力行(22) + パディング合計(18) = 62px
-			int clientH = 62 * dpi / 96;
+			int clientH = (pThis->commentPopupOpen_
+			    ? COMMENT_BASE_CSS_H + COMMENT_POPUP_CSS_H
+			    : COMMENT_BASE_CSS_H) * dpi / 96;
 			RECT rcAdj = { 0, 0, 0, clientH };
 			AdjustWindowRectEx(&rcAdj, static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_STYLE)), FALSE,
 			    static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_EXSTYLE)));
@@ -3524,6 +3613,7 @@ LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			pThis->pWV2_.Reset();
 			pThis->pWV2Controller_.Reset();
 			pThis->wv2Ready_ = false;
+			pThis->commentPopupOpen_ = false;
 			pThis->hCommentWindow_ = nullptr;
 			pThis->hCommentEdit_ = nullptr;
 		}

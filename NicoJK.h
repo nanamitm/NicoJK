@@ -259,6 +259,7 @@ private:
 	HWND hLoginLastLogin_;
 	HWND hCommentWindow_;
 	HWND hCommentEdit_;
+	bool commentPopupOpen_   = false;
 	Microsoft::WRL::ComPtr<ICoreWebView2Controller> pWV2Controller_;
 	Microsoft::WRL::ComPtr<ICoreWebView2>           pWV2_;
 	EventRegistrationToken                          wv2MsgToken_ = {};
