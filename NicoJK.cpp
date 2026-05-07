@@ -1920,9 +1920,7 @@ void CNicoJK::ShowCommentWindow()
 		// 縦サイズを DPI から計算（WM_SIZING でも固定するが初期値も正確にする）
 		int dpi = m_pApp ? m_pApp->GetSystemDPI() : 96;
 		if (dpi == 0) dpi = 96;
-		int margin = 8 * dpi / 96, gap = 4 * dpi / 96;
-		int editH  = 22 * dpi / 96, radioH = 20 * dpi / 96;
-		int clientH = margin + editH + gap + radioH + margin;
+		int clientH = COMMENT_BASE_CSS_H * dpi / 96;
 		RECT rcAdj = { 0, 0, 440, clientH };
 		AdjustWindowRectEx(&rcAdj, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX, FALSE, WS_EX_TOOLWINDOW);
 		hCommentWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.commentpost"), TEXT("NicoJK - コメント投稿"),
