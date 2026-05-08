@@ -3709,7 +3709,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .fi.sel{background:rgba(128,128,128,.22);outline:1px solid rgba(128,128,128,.4)}
 .ff{flex-shrink:0;min-width:5.5em;font-variant-numeric:tabular-nums;margin-right:.3em;font-size:.9em}
 .fn{flex-shrink:0;margin-right:.3em}
-.fe{flex:1;opacity:.7;overflow:hidden;min-width:0;font-size:.9em}
+.fe{flex:1;color:#9acd32;overflow:hidden;min-width:0;font-size:.9em}
 </style></head><body><div id="L"></div><div id="F"></div><script>
 const L=document.getElementById('L'),F=document.getElementById('F');
 let bot=true,sel=null,fsel=null;
@@ -3734,7 +3734,7 @@ function add(d){
   return v;
 }
 function fc(v){
-  if(v<0)return'#808080';
+  if(v<=0)return'#808080';
   if(v<=50)return'#008000';
   if(v<=100)return'#0080FF';
   if(v<=200)return'#FF8000';
