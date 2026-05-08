@@ -20,6 +20,7 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
+#include <Vsstyle.h>
 #include <winhttp.h>
 #include <wrl/event.h>
 #include <oleidl.h>
