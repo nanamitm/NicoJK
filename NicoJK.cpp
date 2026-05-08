@@ -3263,7 +3263,7 @@ c.addEventListener('keydown',e=>{
     }
     e.preventDefault();
   }
-});
+});)" LR"(
 c.addEventListener('focus',()=>{if(po){po=false;cb.classList.remove('open');pp.style.visibility='hidden';}});
 window.chrome.webview.addEventListener('message',e=>{
   const msg=JSON.parse(e.data);
@@ -3309,6 +3309,9 @@ window.chrome.webview.addEventListener('message',e=>{
     c.value='';
   }else if(msg.cmd==='focus_input'){
     c.focus();
+  }else if(msg.cmd==='input_color'){
+    c.style.background=msg.bg||'';
+    c.style.color=msg.fg||'';
   }else if(msg.cmd==='thm'){
     document.documentElement.style.setProperty('--bg',msg.bg);
     document.documentElement.style.setProperty('--fg',msg.fg);
@@ -3398,6 +3401,19 @@ void CNicoJK::ApplyLogWV2Theme()
 	swprintf_s(fnt, L"{\"cmd\":\"fnt\",\"nm\":\"%s\",\"sz\":%d}",
 	    LogJsonEsc(s_.forceFontName).c_str(), s_.forceFontSize);
 	pLogWV2_->PostWebMessageAsString(fnt);
+	// 投稿先に応じて入力欄の色を設定（bRefugeMixing 時のみ）
+	if (s_.bRefugeMixing) {
+		COLORREF cr = bPostToRefuge_ ? s_.crRefugeEditBox : s_.crNicoEditBox;
+		if (cr != RGB(0xFF, 0xFF, 0xFF)) {
+			COLORREF fg2 = GetBrightness(cr) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
+			wchar_t ic[64];
+			swprintf_s(ic, L"{\"cmd\":\"input_color\",\"bg\":\"%s\",\"fg\":\"%s\"}",
+			    LogColorToHex(cr).c_str(), LogColorToHex(fg2).c_str());
+			pLogWV2_->PostWebMessageAsString(ic);
+			return;
+		}
+	}
+	pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"input_color\",\"bg\":\"\",\"fg\":\"\"}");
 }
 
 void CNicoJK::SendLogWV2AboneUpdate(LPCTSTR marker, bool state)
@@ -3704,8 +3720,6 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_LOGIN), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("?"), WS_CHILD | WS_VISIBLE,
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr) &&
-	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("C"), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_COMMENT), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
 	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(0, TEXT("EDIT"), nullptr, WS_CHILD,
@@ -3722,7 +3736,6 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 			SendDlgItemMessage(hwnd, IDC_BUTTON_POPUP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_LOGIN, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_HELP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
-			SendDlgItemMessage(hwnd, IDC_BUTTON_COMMENT, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_FORCELIST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 		}
 		hForceTooltip_ = CreateWindowEx(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_ALWAYSTIP,
@@ -3749,7 +3762,6 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 		addToolTip(IDC_BUTTON_POPUP, TEXT("ポップアップ表示を切り替える"));
 		addToolTip(IDC_BUTTON_LOGIN, TEXT("ニコニコログイン"));
 		addToolTip(IDC_BUTTON_HELP, TEXT("ローカルコマンドヘルプ"));
-		addToolTip(IDC_BUTTON_COMMENT, TEXT("コメント入力欄にフォーカス"));
 		return true;
 	}
 	return false;
@@ -3938,7 +3950,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_POPUP), m_pApp, TVTestPanelButtonProc);
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_LOGIN), m_pApp, TVTestPanelButtonProc);
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_HELP), m_pApp, TVTestPanelButtonProc);
-				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_COMMENT), m_pApp, TVTestPanelButtonProc);
 			}
 
 			if (s_.commentShareMode == 1 || s_.commentShareMode == 2 || s_.bCheckProcessRecording) {
@@ -4173,7 +4184,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_POPUP));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_LOGIN));
 				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_HELP));
-				ResetTVTestPanelItem(GetDlgItem(hwnd, IDC_BUTTON_COMMENT));
 			}
 			if (hForceTooltip_) {
 				DestroyWindow(hForceTooltip_);
@@ -4705,10 +4715,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			break;
 		case IDC_BUTTON_HELP:
 			ShowLocalCommandHelp();
-			break;
-		case IDC_BUTTON_COMMENT:
-			if (pLogWV2_ && logWV2Ready_)
-				pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"focus_input\"}");
 			break;
 		}
 		break;
@@ -5463,6 +5469,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			if (GetDlgItemText(hwnd, IDC_CB_POST, comm, _countof(comm)) && comm[0] == TEXT('@')) {
 				// ローカルコマンドとして処理
 				ProcessLocalPost(&comm[1]);
+				// ローカルコマンドの場合も入力欄をクリア
+				SendDlgItemMessage(hwnd, IDC_CB_POST, EM_SETSEL, 0, static_cast<LPARAM>(-1));
+				SendDlgItemMessage(hwnd, IDC_CB_POST, WM_CLEAR, 0, 0);
+				if (pLogWV2_ && logWV2Ready_)
+					pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"clri\"}");
 				return TRUE;
 			}
 			TCHAR mail[64];
@@ -5535,8 +5546,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_POPUP), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_LOGIN), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_HELP), swShow);
-					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_COMMENT), swShow);
-				}
+					}
 			}
 			SetWindowPos(hItem, nullptr, 0, 0, rcParent.right-rc.left*2, rcParent.bottom-rc.top, SWP_NOMOVE | SWP_NOZORDER);
 			// WebView2 をリストボックスと同じ矩形に配置、表示モードに応じて切り替え
