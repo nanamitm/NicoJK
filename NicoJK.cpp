@@ -1899,6 +1899,9 @@ void CNicoJK::ShowNicoLoginWindow()
 		hLoginWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.login"), TEXT("NicoJK - ニコニコログイン"),
 		                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
 		                               x, y, w, h, hForce_, nullptr, g_hinstDLL, this);
+		if (hLoginWindow_) {
+			UpdateWindowTheme(nullptr);
+		}
 	}
 	if (hLoginWindow_) {
 		UpdateNicoLoginWindowState();
