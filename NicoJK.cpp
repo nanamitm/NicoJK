@@ -20,11 +20,6 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
-#include <d2d1.h>
-#include <d2d1helper.h>
-#include <dwrite_2.h>
-#include <Vsstyle.h>
-#include <richedit.h>
 #include <winhttp.h>
 #include <wrl/event.h>
 #include <oleidl.h>
@@ -35,13 +30,6 @@ using Microsoft::WRL::Callback;
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
-#pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "dwrite.lib")
-
-// Windows 8.1 未満の SDK でも定義されるようにフォールバック
-#ifndef DWRITE_E_NOCOLOR
-#define DWRITE_E_NOCOLOR ((HRESULT)0x88985004L)
-#endif
 
 // ビジュアルスタイルの有効化
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
@@ -167,110 +155,6 @@ enum {
 	LOGIN_STATE_WAIT_2FA,
 };
 
-// カラー絵文字描画用 IDWriteTextRenderer 実装 (リストボックス用)
-class ColorEmojiTextRendererNJ : public IDWriteTextRenderer
-{
-public:
-	ColorEmojiTextRendererNJ(IDWriteFactory2 *pFactory, ID2D1RenderTarget *pRT, D2D1_COLOR_F color)
-		: pFactory_(pFactory), pRT_(pRT), color_(color), refCount_(1) {}
-
-	// IUnknown (スタック割り当てなので delete しない)
-	ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount_; }
-	ULONG STDMETHODCALLTYPE Release() override { return --refCount_; }
-	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
-		if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWritePixelSnapping) || riid == __uuidof(IDWriteTextRenderer)) {
-			*ppv = this; AddRef(); return S_OK;
-		}
-		*ppv = nullptr; return E_NOINTERFACE;
-	}
-
-	// IDWritePixelSnapping
-	HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL *isDisabled) override {
-		*isDisabled = FALSE; return S_OK;
-	}
-	HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX *transform) override {
-		pRT_->GetTransform(reinterpret_cast<D2D1_MATRIX_3X2_F*>(transform)); return S_OK;
-	}
-	HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT *ppd) override {
-		float x, y; pRT_->GetDpi(&x, &y); *ppd = y / 96.0f; return S_OK;
-	}
-
-	// IDWriteTextRenderer
-	HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT originX, FLOAT originY,
-		DWRITE_MEASURING_MODE mode, DWRITE_GLYPH_RUN const *run,
-		DWRITE_GLYPH_RUN_DESCRIPTION const *desc, IUnknown*) override
-	{
-		IDWriteColorGlyphRunEnumerator *pEnum = nullptr;
-		HRESULT hr = pFactory_->TranslateColorGlyphRun(originX, originY, run, desc, mode, nullptr, 0, &pEnum);
-		if (hr == DWRITE_E_NOCOLOR || FAILED(hr)) {
-			ID2D1SolidColorBrush *pBrush = nullptr;
-			if (SUCCEEDED(pRT_->CreateSolidColorBrush(color_, &pBrush))) {
-				pRT_->DrawGlyphRun(D2D1::Point2F(originX, originY), run, pBrush, mode);
-				pBrush->Release();
-			}
-		} else {
-			BOOL hasRun = FALSE;
-			while (SUCCEEDED(pEnum->MoveNext(&hasRun)) && hasRun) {
-				const DWRITE_COLOR_GLYPH_RUN *pColorRun = nullptr;
-				pEnum->GetCurrentRun(&pColorRun);
-				D2D1_COLOR_F col = (pColorRun->paletteIndex == 0xFFFF) ? color_ :
-					D2D1::ColorF(pColorRun->runColor.r, pColorRun->runColor.g,
-					             pColorRun->runColor.b, pColorRun->runColor.a);
-				ID2D1SolidColorBrush *pBrush = nullptr;
-				if (SUCCEEDED(pRT_->CreateSolidColorBrush(col, &pBrush))) {
-					pRT_->DrawGlyphRun(
-						D2D1::Point2F(pColorRun->baselineOriginX, pColorRun->baselineOriginY),
-						&pColorRun->glyphRun, pBrush, mode);
-					pBrush->Release();
-				}
-			}
-			pEnum->Release();
-		}
-		return S_OK;
-	}
-
-	HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, DWRITE_UNDERLINE const*, IUnknown*) override { return S_OK; }
-	HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, DWRITE_STRIKETHROUGH const*, IUnknown*) override { return S_OK; }
-	HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
-
-private:
-	IDWriteFactory2 *pFactory_;
-	ID2D1RenderTarget *pRT_;
-	D2D1_COLOR_F color_;
-	ULONG refCount_;
-};
-
-// 絵文字を含むかを判定
-static bool ContainsEmoji(LPCTSTR text) {
-    for (; *text; ++text) {
-        unsigned int cp = static_cast<unsigned short>(*text);
-
-        // 1. サロゲートペア (U+10000以上)
-        // 顔文字、食べ物、乗り物、国旗、新しい記号など。
-        // D2Dでカラー描画が必要なものの 90% 以上がここに含まれます。
-        if (cp >= 0xD800 && cp <= 0xDBFF) return true;
-
-        // 2. BMP内の絵文字として扱われやすい記号
-        // ⌚(231A), ⏩(23E9), ☔(2614), ⚡(26A1), ⚠️(26A0) など。
-        if ((cp >= 0x231A && cp <= 0x231B) ||
-            (cp >= 0x23E9 && cp <= 0x23EC) ||
-            (cp >= 0x23F0 && cp <= 0x23F3) ||
-            (cp >= 0x25AA && cp <= 0x25AB) ||
-            (cp >= 0x25B6 && cp <= 0x25C0) ||
-            (cp >= 0x25FB && cp <= 0x25FE) ||
-            (cp >= 0x2600 && cp <= 0x27BF) ||
-            (cp >= 0x2934 && cp <= 0x2935) ||
-            (cp >= 0x2B05 && cp <= 0x2B55)) return true;
-
-        // 3. バリエーションセレクター (U+FE0E, U+FE0F)
-        // 前の文字をテキストにするかカラーにするかの指示。
-        // これが含まれる場合も、カラー描画オプションを有効にするのが無難です。
-        if (cp >= 0xFE00 && cp <= 0xFE0F) return true;
-    }
-    return false;
-}
-
-}
 
 CNicoJKPanelColor::CNicoJKPanelColor()
 	: crPanelText_(0)
@@ -377,16 +261,6 @@ CNicoJK::CNicoJK()
 	, hLoginStatus_(nullptr)
 	, hLoginLastLogin_(nullptr)
 	, hForceFont_(nullptr)
-	, pDWriteFactory_(nullptr)
-	, pD2DFactory_(nullptr)
-	, pD2DTarget_(nullptr)
-	, pDWriteFormat_(nullptr)
-	, cachedDWriteFontSizePx_(0.0f)
-	, hdcMemCache_(nullptr)
-	, hbmMemCache_(nullptr)
-	, hbmMemCacheDefault_(nullptr)
-	, cachedMemW_(0)
-	, cachedMemH_(0)
 	, bDisplayLogList_(false)
 	, logListDisplayedSize_(0)
 	, bPendingTimerUpdateList_(false)
@@ -431,7 +305,6 @@ CNicoJK::CNicoJK()
 {
 	cookie_[0] = '\0';
 	lastPostComm_[0] = TEXT('\0');
-	cachedDWriteFontName_[0] = TEXT('\0');
 	logReader_.SetCheckIntervalMsec(READ_LOG_FOLDER_INTERVAL);
 	SETTINGS s = {};
 	s_ = s;
@@ -527,22 +400,6 @@ bool CNicoJK::Initialize()
 	if (!commentWindow_.Initialize(g_hinstDLL, &bEnableOsdCompositor, bSetHookOsdCompositor)) {
 		return false;
 	}
-	// Direct2D / DirectWrite 初期化 (リストボックスのカラー絵文字対応)
-	{
-		D2D1_FACTORY_OPTIONS d2dOpts = {};
-		if (SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-		                                __uuidof(ID2D1Factory), &d2dOpts,
-		                                reinterpret_cast<void**>(&pD2DFactory_)))) {
-			// D2D_ALPHA_MODE_IGNORE: GDI 描画済み背景との合成でプレマル問題を回避
-			D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-				D2D1_RENDER_TARGET_TYPE_DEFAULT,
-				D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-				96.0f, 96.0f);
-			pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
-		}
-		DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
-		                    reinterpret_cast<IUnknown**>(&pDWriteFactory_));
-	}
 	if (bEnableOsdCompositor) {
 		m_pApp->AddLog(L"OsdCompositorを初期化しました。");
 	}
@@ -623,16 +480,6 @@ bool CNicoJK::Finalize()
 		bDragAcceptFiles_ = false;
 	}
 	commentWindow_.Finalize();
-	if (pDWriteFormat_) { pDWriteFormat_->Release(); pDWriteFormat_ = nullptr; }
-	if (hdcMemCache_) {
-		if (hbmMemCache_) { SelectBitmap(hdcMemCache_, hbmMemCacheDefault_); DeleteBitmap(hbmMemCache_); }
-		DeleteDC(hdcMemCache_);
-		hdcMemCache_ = nullptr; hbmMemCache_ = nullptr; hbmMemCacheDefault_ = nullptr;
-		cachedMemW_ = 0; cachedMemH_ = 0;
-	}
-	if (pD2DTarget_) { pD2DTarget_->Release(); pD2DTarget_ = nullptr; }
-	if (pD2DFactory_) { pD2DFactory_->Release(); pD2DFactory_ = nullptr; }
-	if (pDWriteFactory_) { pDWriteFactory_->Release(); pDWriteFactory_ = nullptr; }
 	return true;
 }
 
@@ -4190,14 +4037,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			if (pLogWV2_) { pLogWV2_->remove_WebMessageReceived(logWV2MsgToken_); }
 			if (pLogWV2Controller_) { pLogWV2Controller_->Close(); }
 			pLogWV2_.Reset(); pLogWV2Controller_.Reset(); logWV2Ready_ = false;
-			// キャッシュ DWrite フォーマットとオフスクリーン DC を解放
-			if (pDWriteFormat_) { pDWriteFormat_->Release(); pDWriteFormat_ = nullptr; }
-			if (hdcMemCache_) {
-				if (hbmMemCache_) { SelectBitmap(hdcMemCache_, hbmMemCacheDefault_); DeleteBitmap(hbmMemCache_); }
-				DeleteDC(hdcMemCache_);
-				hdcMemCache_ = nullptr; hbmMemCache_ = nullptr; hbmMemCacheDefault_ = nullptr;
-				cachedMemW_ = 0; cachedMemH_ = 0;
-			}
 			hForce_ = nullptr;
 		}
 		break;
