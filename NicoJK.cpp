@@ -3891,6 +3891,12 @@ void CNicoJK::SendLogWV2AboneUpdate(LPCTSTR marker, bool state)
 void CNicoJK::SendForceListWV2Update()
 {
 	if (!pLogWV2_ || !logWV2Ready_) return;
+	// デバッグ: 呼び出し確認と件数確認
+	{
+		TCHAR dbg[64];
+		_stprintf_s(dbg, TEXT("SendForceListWV2Update: %d channels"), (int)forceList_.size());
+		OutputMessageLog(dbg);
+	}
 	ULONGLONG nowTick = GetTickCount64();
 	std::wstring json = L"{\"cmd\":\"frc\",\"sel\":";
 	json += std::to_wstring(currentJKToGet_);
