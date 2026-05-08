@@ -2877,7 +2877,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .fi.sel{background:rgba(128,128,128,.22);outline:1px solid rgba(128,128,128,.4)}
 .ff{flex-shrink:0;min-width:5.5em;font-variant-numeric:tabular-nums;margin-right:.3em;font-size:.9em}
 .fn{flex-shrink:0;margin-right:.3em}
-.fe{flex:1;color:#9acd32;overflow:hidden;min-width:0;font-size:.9em}
+.fe{flex:1;color:#9acd32;overflow:hidden;min-width:0;font-size:.9em;font-variant-emoji:text}
 #pp{position:absolute;bottom:34px;left:0;right:0;height:28px;display:flex;align-items:center;gap:3px;padding:0 5px;background:var(--bg);border-top:1px solid rgba(128,128,128,.3);visibility:hidden;z-index:10}
 .cc{width:16px;height:16px;border-radius:50%;cursor:pointer;flex-shrink:0;border:2px solid transparent}
 .cc.on{box-shadow:0 0 0 2px var(--fg,#000)}
