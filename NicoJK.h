@@ -102,7 +102,6 @@ private:
 		COLORREF crRefugeLightShadow;
 		COLORREF crNicoDarkShadow;
 		COLORREF crRefugeDarkShadow;
-		tstring mailDecorations;
 		bool bAnonymity;
 		bool bUseOsdCompositor;
 		bool bUseTexture;
@@ -199,7 +198,6 @@ private:
 	void UpdateWindowTheme(HWND hwnd = nullptr);
 	void ShowLocalCommandHelp();
 	void ShowNicoLoginWindow();
-	void ShowCommentWindow();
 	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
 	void RequestJkcnslLoginSettings();
 	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
@@ -263,14 +261,6 @@ private:
 	size_t logListDisplayedSize_;
 	bool bPendingTimerUpdateList_;
 	DWORD lastUpdateListTick_;
-	tstring lastCalcLeftText_;
-	tstring lastCalcMiddleText_;
-	int lastCalcLeftWidth_;
-	int lastCalcMiddleWidth_;
-	tstring lastCalcLeftTextD2D_;
-	tstring lastCalcMiddleTextD2D_;
-	int lastCalcLeftWidthD2D_;
-	int lastCalcMiddleWidthD2D_;
 	CNicoJKPanelColor panelColor_;
 
 	// コメント描画ウィンドウ

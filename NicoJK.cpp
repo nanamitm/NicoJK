@@ -111,10 +111,6 @@ const UINT WMS_FORCE_LIST_SEL  = WM_APP + 116;
 const UINT ID_FORCE_LIST_COPY = 1;
 const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
 
-enum {
-	IDC_COMMENT_EDIT = 3001,
-	IDC_COMMENT_SEND = 3002,
-};
 
 enum {
 	IDC_LOGIN_MAIL = 2001,
@@ -267,10 +263,6 @@ CNicoJK::CNicoJK()
 	, logListDisplayedSize_(0)
 	, bPendingTimerUpdateList_(false)
 	, lastUpdateListTick_(0)
-	, lastCalcLeftWidth_(0)
-	, lastCalcMiddleWidth_(0)
-	, lastCalcLeftWidthD2D_(0)
-	, lastCalcMiddleWidthD2D_(0)
 	, forwardTick_(0)
 	, bQuitSyncThread_(false)
 	, bPendingTimerForward_(false)
@@ -700,7 +692,6 @@ void CNicoJK::LoadFromIni()
 	s_.crRefugeLightShadow	= GetColor(TStringToPrintableAsciiString(GetBufferedProfileToString(buf.data(), TEXT("refugeLightShadowColor"), TEXT("pink")).c_str()).c_str());
 	s_.crNicoDarkShadow		= GetColor(TStringToPrintableAsciiString(GetBufferedProfileToString(buf.data(), TEXT("nicoDarkShadowColor"), TEXT("black")).c_str()).c_str());
 	s_.crRefugeDarkShadow	= GetColor(TStringToPrintableAsciiString(GetBufferedProfileToString(buf.data(), TEXT("refugeDarkShadowColor"), TEXT("#990000")).c_str()).c_str());
-	s_.mailDecorations		= GetBufferedProfileToString(buf.data(), TEXT("mailDecorations"), TEXT("[cyan]:[red]:[green small]:[orange]::"));
 	s_.bAnonymity			= GetBufferedProfileInt(buf.data(), TEXT("anonymity"), 1) != 0;
 	s_.bUseOsdCompositor	= GetBufferedProfileInt(buf.data(), TEXT("useOsdCompositor"), 0) != 0;
 	s_.bUseTexture			= GetBufferedProfileInt(buf.data(), TEXT("useTexture"), 1) != 0;
@@ -1515,15 +1506,6 @@ static int GetBrightness(COLORREF cr)
 	return 3 * GetRValue(cr) + 6 * GetGValue(cr) + GetBValue(cr);
 }
 
-static COLORREF GetForceColor(int force)
-{
-	if (force <= 0) return RGB(0x80, 0x80, 0x80);// 灰色
-	if (force <= 50) return RGB(0x00, 0x80, 0x00);//緑
-	if (force <= 100) return RGB(0x00, 0x80, 0xFF);//青
-	if (force <= 200) return RGB(0xFF, 0x80, 0x00);//オレンジ
-	return RGB(0xFF, 0x00, 0x00);//赤
-}
-
 // コメント(chatタグ)1行を解釈してコメントウィンドウに送る
 bool CNicoJK::ProcessChatTag(const char *tag, bool bShow, int showDelay, bool *pbRefuge)
 {
@@ -1720,11 +1702,6 @@ void CNicoJK::ShowNicoLoginWindow()
 	}
 }
 
-void CNicoJK::ShowCommentWindow()
-{
-	if (pLogWV2_ && logWV2Ready_)
-		pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"focus_input\"}");
-}
 
 void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 {
@@ -2251,40 +2228,6 @@ void CNicoJK::ToggleLogListNG(int index)
 	}
 }
 
-static tstring FormatListBoxTextForCopy(LPCTSTR text)
-{
-	if (!text) {
-		return tstring();
-	}
-	if (text[0] == TEXT('#')) {
-		++text;
-	}
-	if (text[0] == TEXT('[')) {
-		LPCTSTR pEnd = _tcschr(text + 1, TEXT(']'));
-		if (pEnd) {
-			text = pEnd + 1;
-		}
-	}
-
-	tstring out;
-	while (*text) {
-		if (*text == TEXT('{')) {
-			LPCTSTR pEnd = _tcschr(text + 1, TEXT('}'));
-			if (pEnd) {
-				size_t fixedLen = pEnd - (text + 1);
-				LPCTSTR pDraw = pEnd + 1;
-				if (_tcslen(pDraw) >= fixedLen) {
-					out.append(pDraw, fixedLen);
-					text = pDraw + fixedLen;
-					continue;
-				}
-			}
-		}
-		out.push_back(*text++);
-	}
-	return out;
-}
-
 static bool CopyTextToClipboard(HWND hwnd, const tstring &text)
 {
 	if (!OpenClipboard(hwnd)) {
@@ -2375,8 +2318,6 @@ static BOOL CALLBACK FindWV2HwndEnum(HWND hwnd, LPARAM lParam) {
 	return TRUE;
 }
 
-
-// サブクラス化した投稿欄のプロシージャ
 
 // サブクラス化したボタンのプロシージャ
 static LRESULT CALLBACK TVTestPanelButtonProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -3660,10 +3601,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			logList_.clear();
 			logListDisplayedSize_ = 0;
 			bPendingTimerUpdateList_ = false;
-			lastCalcLeftText_.clear();
-			lastCalcMiddleText_.clear();
-			lastCalcLeftTextD2D_.clear();
-			lastCalcMiddleTextD2D_.clear();
 			commentWindow_.SetStyle(s_.commentFontName, s_.commentFontNameMulti, s_.commentFontNameEmoji, s_.bCommentFontBold, s_.bCommentFontAntiAlias,
 			                        s_.commentFontOutline, s_.bUseOsdCompositor, s_.bUseTexture, s_.bUseDrawingThread);
 			commentWindow_.SetCommentSize(s_.commentSize, s_.commentSizeMin, s_.commentSizeMax, s_.commentLineMargin);
