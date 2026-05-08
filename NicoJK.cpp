@@ -5820,25 +5820,25 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		return TRUE;
 	case WMS_FORCE_LIST_SEL:
 		// WebView2 勢いリストのチャンネル選択（LBN_SELCHANGE と同じ処理）
-		if (pThis && !pThis->bDisplayLogList_) {
+		if (!bDisplayLogList_) {
 			int jkID = static_cast<int>(wParam);
-			if (pThis->currentJKToGet_ != jkID) {
-				pThis->currentJKToGet_ = jkID;
-				pThis->jkStream_.Shutdown();
-				pThis->commentWindow_.ClearChat();
+			if (currentJKToGet_ != jkID) {
+				currentJKToGet_ = jkID;
+				jkStream_.Shutdown();
+				commentWindow_.ClearChat();
 				SetTimer(hwnd, TIMER_JK_WATCHDOG, JK_WATCHDOG_RECONNEC_DELAY, nullptr);
 			}
-			if (pThis->s_.bSetChannel && !pThis->bUsingLogfileDriver_ && !pThis->bRecording_ && jkID > 0) {
+			if (s_.bSetChannel && !bUsingLogfileDriver_ && !bRecording_ && jkID > 0) {
 				int spaceNum = 0;
-				pThis->m_pApp->GetTuningSpace(&spaceNum);
-				const DWORD currentNtsID = pThis->GetCurrentNetworkServiceID();
+				m_pApp->GetTuningSpace(&spaceNum);
+				const DWORD currentNtsID = GetCurrentNetworkServiceID();
 				bool bSelected = false;
 				for (int currentTuning = 0; currentTuning < spaceNum && !bSelected; ++currentTuning) {
 					for (int stage = 0; stage < 2 && !bSelected; ++stage) {
 						DWORD ntsID;
-						for (int i = 0; pThis->GetChannelNetworkServiceID(currentTuning, i, &ntsID); ++i) {
-							auto it = LowerBoundNetworkServiceID(pThis->ntsIDList_.begin(), pThis->ntsIDList_.end(), ntsID);
-							int chJK = it != pThis->ntsIDList_.end() && it->ntsID == ntsID ? it->jkID : -1;
+						for (int i = 0; GetChannelNetworkServiceID(currentTuning, i, &ntsID); ++i) {
+							auto it = LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
+							int chJK = it != ntsIDList_.end() && it->ntsID == ntsID ? it->jkID : -1;
 							if ((stage > 0 || (chJK & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) && jkID == (chJK & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
 								if (ntsID != currentNtsID) {
 									TVTest::ChannelSelectInfo cinfo = {};
@@ -5852,7 +5852,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 										cinfo.NetworkID = static_cast<WORD>(ntsID & 0xFFFF);
 									}
 									cinfo.ServiceID = static_cast<WORD>(ntsID >> 16);
-									pThis->m_pApp->SelectChannel(&cinfo);
+									m_pApp->SelectChannel(&cinfo);
 								}
 								bSelected = true;
 								break;
