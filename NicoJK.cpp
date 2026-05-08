@@ -155,6 +155,7 @@ enum {
 	LOGIN_STATE_WAIT_2FA,
 };
 
+} // anonymous namespace
 
 CNicoJKPanelColor::CNicoJKPanelColor()
 	: crPanelText_(0)
