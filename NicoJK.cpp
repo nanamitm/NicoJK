@@ -3747,9 +3747,7 @@ F.addEventListener('click',e=>{
   window.chrome.webview.postMessage(JSON.stringify({cmd:'fsel',id:+fi.dataset.id}));
 });
 window.chrome.webview.addEventListener('message',e=>{
-  let msg;
-  try{msg=JSON.parse(e.data);}
-  catch(err){document.body.style.background='red';return;}
+  const msg=JSON.parse(e.data);
   if(msg.cmd==='upd'){
     L.style.display='';F.style.display='none';
     for(let i=0;i<(msg.tr||0)&&L.firstChild;i++)L.removeChild(L.firstChild);
@@ -3769,8 +3767,7 @@ window.chrome.webview.addEventListener('message',e=>{
     });
     if(sel){sel.classList.remove('s');sel=null;}
   }else if(msg.cmd==='frc'){
-    document.body.style.background='lime'; // デバッグ: frc受信確認
-    L.style.display='none';F.style.display='';
+    L.style.display='none';F.style.display='block';
     const selId=msg.sel,frag=document.createDocumentFragment();
     fsel=null;
     (msg.items||[]).forEach(d=>{
@@ -3894,12 +3891,6 @@ void CNicoJK::SendLogWV2AboneUpdate(LPCTSTR marker, bool state)
 void CNicoJK::SendForceListWV2Update()
 {
 	if (!pLogWV2_ || !logWV2Ready_) return;
-	// デバッグ: 呼び出し確認と件数確認
-	{
-		TCHAR dbg[64];
-		_stprintf_s(dbg, TEXT("SendForceListWV2Update: %d channels"), (int)forceList_.size());
-		OutputMessageLog(dbg);
-	}
 	ULONGLONG nowTick = GetTickCount64();
 	std::wstring json = L"{\"cmd\":\"frc\",\"sel\":";
 	json += std::to_wstring(currentJKToGet_);
