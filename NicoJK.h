@@ -358,4 +358,7 @@ private:
 	tstring tmpSpecFileName_;
 	tstring dropFileName_;
 	int dropFileTimeout_;
+
+	// WebView2 D&D
+	HWND hLogWV2ContentHwnd_ = nullptr;  // RegisterDragDrop 対象の WebView2 内部 HWND
 };

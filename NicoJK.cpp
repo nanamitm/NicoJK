@@ -27,6 +27,8 @@
 #include <richedit.h>
 #include <winhttp.h>
 #include <wrl/event.h>
+#include <oleidl.h>
+#include <ole2.h>
 #pragma comment(lib, "winhttp.lib")
 using Microsoft::WRL::Callback;
 
@@ -449,6 +451,7 @@ bool CNicoJK::GetPluginInfo(TVTest::PluginInfo *pInfo)
 
 bool CNicoJK::Initialize()
 {
+	OleInitialize(nullptr);
 	// ウィンドウクラスを登録
 	WNDCLASSEX wcPanel = {};
 	wcPanel.cbSize = sizeof(wcPanel);
@@ -607,6 +610,7 @@ bool CNicoJK::Initialize()
 
 bool CNicoJK::Finalize()
 {
+	OleUninitialize();
 	// 終了処理
 	TogglePlugin(false);
 	// パネルウィンドウを破棄
@@ -2466,101 +2470,62 @@ static bool CopyTextToClipboard(HWND hwnd, const tstring &text)
 	return true;
 }
 
-// サブクラス化した勢いリストのプロシージャ
-static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-	switch (uMsg) {
-	case WM_PAINT:
-		if (ListBox_GetCount(hwnd) == 0) {
-			PAINTSTRUCT ps;
-			HDC hdc = BeginPaint(hwnd, &ps);
-			FillRect(hdc, &ps.rcPaint, reinterpret_cast<HBRUSH>(GetClassLongPtr(GetParent(hwnd), GCLP_HBRBACKGROUND)));
-			EndPaint(hwnd, &ps);
-			return 0;
-		}
-		break;
-	case WM_ERASEBKGND:
-		{
-			int n = ListBox_GetCount(hwnd);
-			RECT rcLast;
-			if (n > 0 && ListBox_GetItemRect(hwnd, n - 1, &rcLast) != LB_ERR) {
-				// 背景消去範囲を限定することでちらつきを抑える
-				RECT rc;
-				GetClientRect(hwnd, &rc);
-				if (rc.bottom > rcLast.bottom) {
-					rc.top = rcLast.bottom;
-					FillRect(reinterpret_cast<HDC>(wParam), &rc, reinterpret_cast<HBRUSH>(GetClassLongPtr(GetParent(hwnd), GCLP_HBRBACKGROUND)));
-				}
-				return TRUE;
-			}
-		}
-		break;
-	case WM_CONTEXTMENU:
-		{
-			int index = LB_ERR;
-			POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-			if (pt.x == -1 && pt.y == -1) {
-				index = ListBox_GetCurSel(hwnd);
-				RECT rcItem;
-				if (index != LB_ERR && ListBox_GetItemRect(hwnd, index, &rcItem) != LB_ERR) {
-					pt.x = rcItem.left + 2;
-					pt.y = rcItem.top + (rcItem.bottom - rcItem.top) / 2;
-					ClientToScreen(hwnd, &pt);
-				}
-				else {
-					GetWindowRect(hwnd, &rcItem);
-					pt.x = rcItem.left;
-					pt.y = rcItem.top;
-				}
-			}
-			else {
-				POINT ptClient = pt;
-				ScreenToClient(hwnd, &ptClient);
-				DWORD item = static_cast<DWORD>(SendMessage(hwnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(ptClient.x, ptClient.y)));
-				if (HIWORD(item) == 0) {
-					index = LOWORD(item);
-					ListBox_SetCurSel(hwnd, index);
-				}
-			}
-			if (index == LB_ERR) {
-				return 0;
-			}
-
-			HMENU hMenu = CreatePopupMenu();
-			if (!hMenu) {
-				return 0;
-			}
-			AppendMenu(hMenu, MF_STRING, ID_FORCE_LIST_COPY, TEXT("コピー(&C)"));
-			if (GetProp(hwnd, TEXT("IsLogList"))) {
-				LRESULT ngState = SendMessage(GetParent(hwnd), WM_GET_LOG_LIST_NG_STATE, static_cast<WPARAM>(index), 0);
-				if (ngState >= 0) {
-					AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
-					AppendMenu(hMenu, MF_STRING, ID_FORCE_LIST_TOGGLE_NG, ngState ? TEXT("NG解除(&N)") : TEXT("NG登録(&N)"));
-				}
-			}
-			SetForegroundWindow(hwnd);
-			UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
-			DestroyMenu(hMenu);
-			if (cmd == ID_FORCE_LIST_COPY) {
-				int len = ListBox_GetTextLen(hwnd, index);
-				if (len >= 0) {
-					std::vector<TCHAR> text(len + 1);
-					if (ListBox_GetText(hwnd, index, text.data()) != LB_ERR) {
-						CopyTextToClipboard(hwnd, FormatListBoxTextForCopy(text.data()));
-					}
-				}
-			}
-			else if (cmd == ID_FORCE_LIST_TOGGLE_NG) {
-				SendMessage(GetParent(hwnd), WM_TOGGLE_LOG_LIST_NG, static_cast<WPARAM>(index), 0);
-			}
-			return 0;
-		}
-	case WM_GETDLGCODE:
-		// 本体のアクセラレータを抑制するため
-		return DLGC_WANTARROWS;
+// WebView2 エリアへのファイルドロップを受け取る IDropTarget 実装
+class CNicoJKDropTarget : public IDropTarget {
+	HWND hwndForce_;
+	LONG refCount_;
+	bool hasFiles_;
+public:
+	explicit CNicoJKDropTarget(HWND hwnd) : hwndForce_(hwnd), refCount_(1), hasFiles_(false) {}
+	// IUnknown
+	ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refCount_); }
+	ULONG STDMETHODCALLTYPE Release() override {
+		LONG r = InterlockedDecrement(&refCount_); if (!r) delete this; return r;
 	}
-	return CallWindowProc(reinterpret_cast<WNDPROC>(GetProp(hwnd, TEXT("DefProc"))), hwnd, uMsg, wParam, lParam);
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+		if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+			*ppv = static_cast<IDropTarget*>(this); AddRef(); return S_OK;
+		}
+		*ppv = nullptr; return E_NOINTERFACE;
+	}
+	// IDropTarget
+	HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* pDO, DWORD, POINTL, DWORD* pdwEffect) override {
+		FORMATETC fmt = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+		hasFiles_ = (pDO->QueryGetData(&fmt) == S_OK);
+		*pdwEffect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* pdwEffect) override {
+		*pdwEffect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE DragLeave() override { hasFiles_ = false; return S_OK; }
+	HRESULT STDMETHODCALLTYPE Drop(IDataObject* pDO, DWORD, POINTL, DWORD* pdwEffect) override {
+		FORMATETC fmt = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+		STGMEDIUM stg = {};
+		*pdwEffect = DROPEFFECT_NONE;
+		if (SUCCEEDED(pDO->GetData(&fmt, &stg))) {
+			// HDROP の所有権を WM_DROPFILES に移転。DefWindowProc が DragFinish で解放する。
+			SendMessage(hwndForce_, WM_DROPFILES, reinterpret_cast<WPARAM>(stg.hGlobal), 0);
+			stg.hGlobal = nullptr; // 二重解放防止
+			*pdwEffect = DROPEFFECT_COPY;
+		}
+		ReleaseStgMedium(&stg);
+		hasFiles_ = false;
+		return S_OK;
+	}
+};
+
+// WebView2 内部の Chrome_WidgetWin_* HWND を探す
+static BOOL CALLBACK FindWV2HwndEnum(HWND hwnd, LPARAM lParam) {
+	TCHAR cls[64];
+	if (GetClassName(hwnd, cls, _countof(cls)) && _tcsncmp(cls, TEXT("Chrome_Widget"), 13) == 0) {
+		*reinterpret_cast<HWND*>(lParam) = hwnd;
+		return FALSE;
+	}
+	return TRUE;
 }
+
 
 // サブクラス化した投稿欄のプロシージャ
 
@@ -3226,6 +3191,9 @@ cb.addEventListener('mousedown',e=>e.preventDefault());
 cb.addEventListener('click',tog);
 pp.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();});
 la.addEventListener('mousedown',()=>{if(po){po=false;cb.classList.remove('open');pp.style.visibility='hidden';}});
+la.addEventListener('dragover',e=>{e.preventDefault();la.style.outline='2px dashed var(--fg)';});
+la.addEventListener('dragleave',()=>{la.style.outline='';});
+la.addEventListener('drop',e=>{e.preventDefault();la.style.outline='';});
 const cbs=[...document.querySelectorAll('[data-c]')];
 cbs.forEach(b=>b.addEventListener('click',()=>{sc=b.dataset.c;cbs.forEach(x=>x.classList.toggle('on',x.dataset.c===sc));upd();}));
 const pbs=[...document.querySelectorAll('[data-p]')];
@@ -3696,9 +3664,7 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("L"), WS_CHILD | WS_VISIBLE,
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_LOGIN), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("?"), WS_CHILD | WS_VISIBLE,
-	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr) &&
-	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
-	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr))
+	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr))
 	{
 		if (hForceFont_) {
 			SendDlgItemMessage(hwnd, IDC_RADIO_FORCE, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
@@ -3711,7 +3677,6 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 			SendDlgItemMessage(hwnd, IDC_BUTTON_POPUP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_LOGIN, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_HELP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
-			SendDlgItemMessage(hwnd, IDC_FORCELIST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 		}
 		hForceTooltip_ = CreateWindowEx(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_ALWAYSTIP,
 		                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -3800,10 +3765,6 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		panelColor_.SetColor(m_pApp);
 	}
 	bool bDark = panelColor_.IsDark();
-	HWND hList = GetDlgItem(hwndForce, IDC_FORCELIST);
-	if (hList) {
-		SetWindowTheme(hList, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-	}
 	if (hForceTooltip_) {
 		SetWindowTheme(hForceTooltip_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
 	}
@@ -3908,11 +3869,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			// TVTest起動直後はVideo Containerウィンドウの配置が定まっていないようなので再度整える
 			SetTimer(hwnd, TIMER_DONE_SIZE, 500, nullptr);
 
-			// 勢いリストのサブクラス化
-			HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
-			SetProp(hList, TEXT("DefProc"), reinterpret_cast<HANDLE>(GetWindowLongPtr(hList, GWLP_WNDPROC)));
-			RemoveProp(hList, TEXT("IsLogList"));
-			SetWindowLongPtr(hList, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ForceListBoxProc));
 			// パネルアイテムのサブクラス化
 			if (hPanel_) {
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_RADIO_FORCE), m_pApp, TVTestPanelButtonProc);
@@ -4095,7 +4051,19 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                        SendForceListWV2Update();
 				                                    }
 				                                    pLogWV2Controller_->put_IsVisible(TRUE);
-				                                    ShowWindow(GetDlgItem(hwndCap, IDC_FORCELIST), SW_HIDE);
+				                                    // WebView2 内部 HWND に IDropTarget を登録してファイルドロップを受け取る
+				                                    {
+				                                        HWND wv2Hwnd = nullptr;
+				                                        EnumChildWindows(hwndCap, FindWV2HwndEnum, reinterpret_cast<LPARAM>(&wv2Hwnd));
+				                                        if (wv2Hwnd) {
+				                                            RevokeDragDrop(wv2Hwnd); // WebView2 の既定ドロップを無効化
+				                                            auto* pDT = new CNicoJKDropTarget(hwndCap);
+				                                            if (SUCCEEDED(RegisterDragDrop(wv2Hwnd, pDT))) {
+				                                                hLogWV2ContentHwnd_ = wv2Hwnd;
+				                                            }
+				                                            pDT->Release(); // RegisterDragDrop が AddRef 済み
+				                                        }
+				                                    }
 				                                    RECT rc; GetClientRect(hwndCap, &rc);
 				                                    PostMessage(hwndCap, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
 				                                    return S_OK;
@@ -4122,6 +4090,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		return -1;
 	case WM_DESTROY:
 		{
+			// WebView2 D&D 解除
+			if (hLogWV2ContentHwnd_) {
+				RevokeDragDrop(hLogWV2ContentHwnd_);
+				hLogWV2ContentHwnd_ = nullptr;
+			}
 			// channels WebSocket スレッドを停止
 			if (channelWsThread_.joinable()) {
 				SetEvent(hChannelWsQuit_);
@@ -4178,12 +4151,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				hLoginStatus_ = nullptr;
 				hLoginLastLogin_ = nullptr;
 			}
-			// 勢いリストのサブクラス化を解除
-			HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
-			RemoveProp(hList, TEXT("IsLogList"));
-			SetWindowLongPtr(hList, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GetProp(hList, TEXT("DefProc"))));
-			RemoveProp(hList, TEXT("DefProc"));
-
 			// 位置を保存
 			if (!hPanel_ || hPanelPopup_) {
 				GetWindowRect(hPanelPopup_ ? hPanelPopup_ : hwnd, &s_.rcForce);
@@ -4240,20 +4207,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		}
 		break;
 	case WM_MEASUREITEM:
-		{
-			LPMEASUREITEMSTRUCT lpmis = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
-			if (lpmis->CtlID == IDC_FORCELIST && hForceFont_) {
-				HWND hItem = GetDlgItem(hwnd, lpmis->CtlID);
-				HDC hdc = GetDC(hItem);
-				HFONT hFontOld = SelectFont(hdc, hForceFont_);
-				TEXTMETRIC tm;
-				GetTextMetrics(hdc, &tm);
-				SelectFont(hdc, hFontOld);
-				ReleaseDC(hItem, hdc);
-				lpmis->itemHeight = tm.tmHeight + 1;
-				return TRUE;
-			}
-		}
 		break;
 	case WM_CLOSE:
 		// 隠すだけ
@@ -4282,304 +4235,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		}
 		break;
 	case WM_DRAWITEM:
-		{
-			LPDRAWITEMSTRUCT lpdis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
-			if (lpdis->CtlType == ODT_LISTBOX) {
-				bool bSelected = (lpdis->itemState & ODS_SELECTED) != 0;
-				bool bPanelDraw = hPanel_ && panelColor_.GetPanelBackBrush() && panelColor_.GetPanelCurTabBackBrush();
-				COLORREF crItemBack = bPanelDraw ?
-					(bSelected ? panelColor_.GetPanelCurTabBack() : panelColor_.GetPanelBack()) :
-					(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : GetBkColor(lpdis->hDC));
-				COLORREF crItemText = bPanelDraw ?
-					(bSelected ? panelColor_.GetPanelCurTabText() : panelColor_.GetPanelText()) :
-					(bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetTextColor(lpdis->hDC));
-				HBRUSH hbrItemBack = bPanelDraw ?
-					(bSelected ? panelColor_.GetPanelCurTabBackBrush() : panelColor_.GetPanelBackBrush()) : nullptr;
-
-				int itemW = lpdis->rcItem.right  - lpdis->rcItem.left;
-				int itemH = lpdis->rcItem.bottom - lpdis->rcItem.top;
-
-				// オフスクリーン DC をキャッシュして毎回の GDI オブジェクト生成コストを削減
-				if (!hdcMemCache_) {
-					hdcMemCache_ = CreateCompatibleDC(lpdis->hDC);
-					if (hdcMemCache_) {
-						hbmMemCache_ = CreateCompatibleBitmap(lpdis->hDC, itemW, itemH);
-						if (hbmMemCache_) {
-							hbmMemCacheDefault_ = SelectBitmap(hdcMemCache_, hbmMemCache_);
-							cachedMemW_ = itemW;
-							cachedMemH_ = itemH;
-						} else {
-							DeleteDC(hdcMemCache_);
-							hdcMemCache_ = nullptr;
-						}
-					}
-				} else if (itemW > cachedMemW_ || itemH > cachedMemH_) {
-					// アイテムサイズが増えたときだけビットマップを拡大 (縮小はしない)
-					SelectBitmap(hdcMemCache_, hbmMemCacheDefault_);
-					DeleteBitmap(hbmMemCache_);
-					int newW = max(itemW, cachedMemW_);
-					int newH = max(itemH, cachedMemH_);
-					hbmMemCache_ = CreateCompatibleBitmap(lpdis->hDC, newW, newH);
-					if (hbmMemCache_) {
-						hbmMemCacheDefault_ = SelectBitmap(hdcMemCache_, hbmMemCache_);
-						cachedMemW_ = newW;
-						cachedMemH_ = newH;
-					} else {
-						DeleteDC(hdcMemCache_);
-						hdcMemCache_ = nullptr; hbmMemCacheDefault_ = nullptr;
-						cachedMemW_ = 0; cachedMemH_ = 0;
-					}
-				}
-				if (!hdcMemCache_) return TRUE;
-				HDC hdcMem = hdcMemCache_;
-
-				HFONT hFontOld = hForceFont_ ? SelectFont(hdcMem, hForceFont_) : nullptr;
-				RECT rcMem = {0, 0, itemW, itemH};
-				int dcDpi = GetDeviceCaps(lpdis->hDC, LOGPIXELSY);
-				if (dcDpi <= 0) dcDpi = 96;
-
-				// IDWriteTextFormat をキャッシュ (フォント名/サイズが変わったときだけ再生成)
-				float fontSizePx = (float)(s_.forceFontSize * dcDpi) / 72.0f;
-				if (pDWriteFactory_ && (!pDWriteFormat_ || cachedDWriteFontSizePx_ != fontSizePx ||
-				                        _tcscmp(s_.forceFontName, cachedDWriteFontName_) != 0)) {
-					if (pDWriteFormat_) { pDWriteFormat_->Release(); pDWriteFormat_ = nullptr; }
-					if (SUCCEEDED(pDWriteFactory_->CreateTextFormat(
-							s_.forceFontName, nullptr,
-							DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-							DWRITE_FONT_STRETCH_NORMAL, fontSizePx, L"ja", &pDWriteFormat_))) {
-						cachedDWriteFontSizePx_ = fontSizePx;
-						_tcsncpy_s(cachedDWriteFontName_, s_.forceFontName, _TRUNCATE);
-					}
-				}
-
-				if (lpdis->CtlType == ODT_LISTBOX) {
-					HBRUSH hbr = hbrItemBack ? hbrItemBack : CreateSolidBrush(crItemBack);
-					FillRect(hdcMem, &rcMem, hbr);
-					if (!hbrItemBack) {
-						DeleteBrush(hbr);
-					}
-
-					TCHAR text[1024];
-					if (ListBox_GetTextLen(lpdis->hwndItem, lpdis->itemID) < _countof(text)) {
-						int textLen = ListBox_GetText(lpdis->hwndItem, lpdis->itemID, text);
-						if (textLen >= 0) {
-							LPCTSTR pText = text;
-							bool bEmphasis = false;
-							if (pText[0] == TEXT('#')) {
-								bEmphasis = true;
-								++pText;
-							}
-							COLORREF crBk = RGB(0xFF, 0xFF, 0xFF);
-							COLORREF crMiddle = RGB(0, 0, 0);
-							COLORREF crSuffix = RGB(0, 0, 0);
-							size_t leftLen = 0;
-							size_t suffixLen = 0;
-							if (pText[0] == TEXT('[')) {
-								LPCTSTR pEnd = _tcschr(++pText, TEXT(']'));
-								if (pEnd) {
-									crBk = _tcstol(pText, nullptr, 10);
-									LPCTSTR p = _tcschr(pText, TEXT(','));
-									if (p && p < pEnd) {
-										crMiddle = _tcstol(++p, nullptr, 10);
-										p = _tcschr(p, TEXT(','));
-										if (p && p < pEnd) {
-											leftLen = _tcstol(++p, nullptr, 10);
-											p = _tcschr(p, TEXT(','));
-											if (p && p < pEnd) {
-												crSuffix = _tcstol(++p, nullptr, 10);
-												p = _tcschr(p, TEXT(','));
-												if (p && p < pEnd) {
-													suffixLen = _tcstol(++p, nullptr, 10);
-												}
-											}
-										}
-									}
-									pText = pEnd + 1;
-								}
-							}
-							COLORREF crText = bEmphasis && !bSelected ? RGB(0xFF, 0, 0) : crItemText;
-							if (bSelected) {
-								crMiddle = RGB(0, 0, 0);
-								crSuffix = RGB(0, 0, 0);
-							}
-							// rc は memDC 座標系 (0 起点)
-							RECT rc = {1, 0, itemW, itemH};
-
-							bool bHasFixed = (pText[0] == TEXT('{'));
-							tstring calcText, drawText, calcMiddleText, drawMiddleText;
-							if (bHasFixed) {
-								size_t fixedLen = _tcscspn(&pText[1], TEXT("}"));
-								if (text + textLen >= pText + 2 + 2 * fixedLen) {
-									calcText.assign(&pText[1], fixedLen);
-									drawText.assign(&pText[2 + fixedLen], fixedLen);
-									pText += 2 + 2 * fixedLen;
-									int mask = s_.headerMask;
-									size_t maskedLeftLen = min(leftLen, fixedLen);
-									for (size_t i = 0, j = 0; i < calcText.size(); j++, mask >>= 1) {
-										if (mask & 1) {
-											calcText.erase(i, 1);
-											drawText.erase(i, 1);
-											if (j < leftLen) {
-												--maskedLeftLen;
-											}
-										} else {
-											++i;
-										}
-									}
-									calcMiddleText = calcText.substr(maskedLeftLen);
-									drawMiddleText = drawText.substr(maskedLeftLen);
-									calcText.resize(maskedLeftLen);
-									drawText.resize(maskedLeftLen);
-								} else {
-									bHasFixed = false;
-								}
-							}
-							tstring tailText(pText);
-							tstring suffixText;
-							if (suffixLen > 0 && suffixLen <= tailText.size()) {
-								suffixText = tailText.substr(tailText.size() - suffixLen);
-								tailText.resize(tailText.size() - suffixLen);
-							}
-
-							// 絵文字 (サロゲートペア) を含む場合のみ D2D を使用、それ以外は高速 GDI パス
-							bool bNeedD2D = pD2DTarget_ && pDWriteFormat_ &&
-							                (ContainsEmoji(tailText.c_str()) ||
-							                 ContainsEmoji(suffixText.c_str()) ||
-							                 (bHasFixed && (ContainsEmoji(drawText.c_str()) ||
-							                                ContainsEmoji(drawMiddleText.c_str()))));
-
-							if (bNeedD2D && SUCCEEDED(pD2DTarget_->BindDC(hdcMem, &rcMem))) {
-								// measureDW: キャッシュ済みフォーマットを再利用してレイアウトのみ生成
-								auto measureDW = [&](const tstring &txt) -> int {
-									IDWriteTextLayout *pLayout = nullptr;
-									if (FAILED(pDWriteFactory_->CreateTextLayout(
-											txt.c_str(), (UINT32)txt.size(), pDWriteFormat_, 10000.f, 10000.f, &pLayout))) return 0;
-									DWRITE_TEXT_METRICS met = {};
-									pLayout->GetMetrics(&met);
-									pLayout->Release();
-									return (int)ceilf(met.width);
-								};
-
-								pD2DTarget_->BeginDraw();
-								pD2DTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-
-								auto drawSegDW = [&](const tstring &txt, COLORREF cr) {
-									IDWriteTextLayout *pLayout = nullptr;
-									int layoutW = max<int>(itemW - rc.left, 1);
-									int layoutH = max(itemH, 1);
-									if (FAILED(pDWriteFactory_->CreateTextLayout(
-											txt.c_str(), (UINT32)txt.size(), pDWriteFormat_,
-											(float)layoutW, (float)layoutH, &pLayout))) return;
-									D2D1_COLOR_F col = D2D1::ColorF(GetRValue(cr)/255.f, GetGValue(cr)/255.f, GetBValue(cr)/255.f);
-									ColorEmojiTextRendererNJ renderer(pDWriteFactory_, pD2DTarget_, col);
-									pLayout->Draw(nullptr, &renderer, (float)rc.left, (float)rc.top);
-									pLayout->Release();
-								};
-
-								if (bHasFixed && !calcText.empty()) {
-									if (lastCalcLeftTextD2D_ != calcText) {
-										lastCalcLeftTextD2D_ = calcText;
-										lastCalcLeftWidthD2D_ = measureDW(calcText);
-									}
-									drawSegDW(drawText, crText);
-									rc.left += lastCalcLeftWidthD2D_;
-								}
-								if (bHasFixed && !calcMiddleText.empty()) {
-									if (lastCalcMiddleTextD2D_ != calcMiddleText) {
-										lastCalcMiddleTextD2D_ = calcMiddleText;
-										lastCalcMiddleWidthD2D_ = measureDW(calcMiddleText);
-									}
-									drawSegDW(drawMiddleText, crMiddle != RGB(0, 0, 0) ? crMiddle : crText);
-									rc.left += lastCalcMiddleWidthD2D_;
-								}
-								if (!bSelected && crBk != RGB(0xFF, 0xFF, 0xFF)) {
-									int measuredW = measureDW(tstring(pText));
-									ID2D1SolidColorBrush *pBkBrush = nullptr;
-									if (SUCCEEDED(pD2DTarget_->CreateSolidColorBrush(
-											D2D1::ColorF(GetRValue(crBk)/255.f, GetGValue(crBk)/255.f, GetBValue(crBk)/255.f),
-											&pBkBrush))) {
-										pD2DTarget_->FillRectangle(
-											D2D1::RectF((float)rc.left, 0.f, (float)(rc.left + measuredW), (float)itemH), pBkBrush);
-										pBkBrush->Release();
-									}
-									crText = GetBrightness(crBk) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
-								}
-								drawSegDW(tailText, crText);
-								if (!suffixText.empty()) {
-									rc.left += measureDW(tailText);
-									drawSegDW(suffixText, crSuffix != RGB(0, 0, 0) ? crSuffix : crText);
-								}
-
-								if (FAILED(pD2DTarget_->EndDraw())) {
-									pD2DTarget_->Release(); pD2DTarget_ = nullptr;
-									if (pD2DFactory_) {
-										D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-											D2D1_RENDER_TARGET_TYPE_DEFAULT,
-											D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-											96.0f, 96.0f);
-										pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
-									}
-								}
-							} else {
-								// GDI 高速パス (絵文字なし): memDC 座標系で描画
-								int oldBkMode = SetBkMode(hdcMem, TRANSPARENT);
-								COLORREF crOld = SetTextColor(hdcMem, crText);
-
-								if (bHasFixed && !calcText.empty()) {
-									if (lastCalcLeftText_ != calcText) {
-										RECT rcCalc = rc;
-										DrawText(hdcMem, calcText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
-										lastCalcLeftText_ = calcText;
-										lastCalcLeftWidth_ = rcCalc.right - rcCalc.left;
-									}
-									DrawText(hdcMem, drawText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-									rc.left += lastCalcLeftWidth_;
-								}
-								if (bHasFixed && !calcMiddleText.empty()) {
-									if (lastCalcMiddleText_ != calcMiddleText) {
-										RECT rcCalc = rc;
-										DrawText(hdcMem, calcMiddleText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
-										lastCalcMiddleText_ = calcMiddleText;
-										lastCalcMiddleWidth_ = rcCalc.right - rcCalc.left;
-									}
-									if (crMiddle != RGB(0, 0, 0)) {
-										SetTextColor(hdcMem, crMiddle);
-									}
-									DrawText(hdcMem, drawMiddleText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-									SetTextColor(hdcMem, crText);
-									rc.left += lastCalcMiddleWidth_;
-								}
-								COLORREF crBkOld = SetBkColor(hdcMem, crBk);
-								if (!bSelected && crBk != RGB(0xFF, 0xFF, 0xFF)) {
-									SetBkMode(hdcMem, OPAQUE);
-									SetTextColor(hdcMem, GetBrightness(crBk) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0));
-								}
-								DrawText(hdcMem, tailText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-								if (!suffixText.empty()) {
-									RECT rcCalc = rc;
-									DrawText(hdcMem, tailText.c_str(), -1, &rcCalc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_CALCRECT);
-									rc.left += rcCalc.right - rcCalc.left;
-									if (crSuffix != RGB(0, 0, 0)) {
-										SetTextColor(hdcMem, crSuffix);
-									}
-									DrawText(hdcMem, suffixText.c_str(), -1, &rc, DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
-								}
-								SetBkColor(hdcMem, crBkOld);
-								SetTextColor(hdcMem, crOld);
-								SetBkMode(hdcMem, oldBkMode);
-							}
-						}
-					}
-				}
-
-				BitBlt(lpdis->hDC, lpdis->rcItem.left, lpdis->rcItem.top,
-				       itemW, itemH, hdcMem, 0, 0, SRCCOPY);
-
-				if (hFontOld) SelectFont(hdcMem, hFontOld);
-				// hdcMem はキャッシュなので DeleteDC しない
-				return TRUE;
-			}
-		}
 		break;
 	case WM_COMMAND:
 		switch (LOWORD(wParam)) {
@@ -4587,7 +4242,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		case IDC_RADIO_LOG:
 			bDisplayLogList_ = SendDlgItemMessage(hwnd, IDC_RADIO_LOG, BM_GETCHECK, 0, 0 ) == BST_CHECKED;
 			if (pLogWV2Controller_) pLogWV2Controller_->put_IsVisible(logWV2Ready_ ? TRUE : FALSE);
-			ShowWindow(GetDlgItem(hwnd, IDC_FORCELIST), logWV2Ready_ ? SW_HIDE : SW_SHOW);
 			SendMessage(hwnd, WM_UPDATE_LIST, TRUE, 0);
 			PostMessage(hwnd, WM_TIMER, TIMER_UPDATE, 0);
 			break;
@@ -4611,66 +4265,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					}
 				}
 				SendDlgItemMessage(hwnd, IDC_CHECK_SPECFILE, BM_SETCHECK, bSpecFile_ ? BST_CHECKED : BST_UNCHECKED, 0);
-			}
-			break;
-		case IDC_FORCELIST:
-			if (HIWORD(wParam) == LBN_SELCHANGE) {
-				if (!bDisplayLogList_) {
-					// 勢いリスト表示中
-					int index = ListBox_GetCurSel((HWND)lParam);
-					int jkID = -1;
-					if (0 <= index && index < (int)forceList_.size()) {
-						jkID = forceList_[index].jkID;
-					}
-					if (currentJKToGet_ != jkID) {
-						currentJKToGet_ = jkID;
-						jkStream_.Shutdown();
-						commentWindow_.ClearChat();
-						SetTimer(hwnd, TIMER_JK_WATCHDOG, JK_WATCHDOG_RECONNEC_DELAY, nullptr);
-					}
-					if (s_.bSetChannel && !bUsingLogfileDriver_ && !bRecording_ && jkID > 0) {
-						// 本体のチャンネル切り替えをする
-						int spaceNum = 0;
-						m_pApp->GetTuningSpace(&spaceNum);
-						const DWORD currentNtsID = GetCurrentNetworkServiceID();
-						bool bSelected = false;
-						for (int currentTuning = 0; currentTuning < spaceNum && !bSelected; ++currentTuning) {
-							for (int stage = 0; stage < 2 && !bSelected; ++stage) {
-								DWORD ntsID;
-								for (int i = 0; GetChannelNetworkServiceID(currentTuning, i, &ntsID); ++i) {
-									std::vector<NETWORK_SERVICE_ID_ELEM>::const_iterator it = LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
-									int chJK = it != ntsIDList_.end() && it->ntsID == ntsID ? it->jkID : -1;
-									// 実況IDが一致するチャンネルに切替
-									// 実況IDからチャンネルへの対応は一般に一意ではないので優先度を設ける
-									if ((stage > 0 || (chJK & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) && jkID == (chJK & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
-										// すでに表示中なら切り替えない
-										if (ntsID != currentNtsID) {
-											TVTest::ChannelSelectInfo cinfo = {};
-											cinfo.Size = sizeof(cinfo);
-											cinfo.Flags = TVTest::CHANNEL_SELECT_FLAG_STRICTSERVICE;
-											cinfo.Space = -1;
-											cinfo.Channel = -1;
-											if ((ntsID & 0xFFFF) == 0x000F) {
-												// 地上波は正規化したネットワークIDなのでチューニング空間を指定する
-												cinfo.Space = currentTuning;
-											}
-											else {
-												cinfo.NetworkID = static_cast<WORD>(ntsID & 0xFFFF);
-											}
-											cinfo.ServiceID = static_cast<WORD>(ntsID >> 16);
-											m_pApp->SelectChannel(&cinfo);
-										}
-										bSelected = true;
-										break;
-									}
-								}
-							}
-						}
-					}
-				}
-			} else if (HIWORD(wParam) == LBN_DBLCLK) {
-				int index = ListBox_GetCurSel((HWND)lParam);
-				ToggleLogListNG(index);
 			}
 			break;
 		case IDC_BUTTON_OPACITY_DOWN:
@@ -4996,59 +4590,26 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				// 再描画の頻度を抑える
 				DWORD tick = lastUpdateListTick_;
 				lastUpdateListTick_ = GetTickCount();
-				if (bPendingTimerUpdateList_) {
-					return TRUE;
-				}
+				if (bPendingTimerUpdateList_) return TRUE;
 				if (lastUpdateListTick_ - tick < COMMENT_REDRAW_INTERVAL) {
 					bPendingTimerUpdateList_ = true;
 					SetTimer(hwnd, TIMER_UPDATE_LIST, COMMENT_REDRAW_INTERVAL - (lastUpdateListTick_ - tick), nullptr);
 					return TRUE;
 				}
 			}
-			HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
 			if (!bDisplayLogList_ || !IsWindowVisible(hwnd)) {
-				// リストが増え続けないようにする
 				for (; logList_.size() > COMMENT_TRIMEND; logList_.pop_front());
 				logListDisplayedSize_ = 0;
 			}
-			if (!IsWindowVisible(hwnd)) {
-				// 非表示中はサボる
-				if (ListBox_GetCount(hList) != 0) {
-					ListBox_ResetContent(hList);
-				}
-				return TRUE;
-			} else if (!bDisplayLogList_ && !wParam) {
-				// 勢いリスト表示中は差分更新(wParam==FALSE)しない
-				return TRUE;
-			}
-			// 描画を一時停止
-			SendMessage(hList, WM_SETREDRAW, FALSE, 0);
+			if (!IsWindowVisible(hwnd)) return TRUE;
+			else if (!bDisplayLogList_ && !wParam) return TRUE;
 			if (bDisplayLogList_) {
-				SetProp(hList, TEXT("IsLogList"), reinterpret_cast<HANDLE>(1));
-			}
-			else {
-				RemoveProp(hList, TEXT("IsLogList"));
-			}
-			int iTopItemIndex = ListBox_GetTopIndex(hList);
-			// wParam!=FALSEのときはリストの内容をリセットする
-			if (wParam) {
-				ListBox_ResetContent(hList);
-				// wParam==2のときはスクロール位置を保存する
-				if (wParam != 2) {
-					iTopItemIndex = 0;
-				}
-			}
-			if (bDisplayLogList_) {
-				// ログリスト表示中
 				if (logWV2Ready_) {
-					// WebView2 パス
 					if (wParam) {
-						// フルリロード
 						for (; logList_.size() > COMMENT_TRIMEND; logList_.pop_front());
 						logListDisplayedSize_ = (int)logList_.size();
 						SendLogWV2Reload();
 					} else {
-						// 差分更新
 						int trimCount = 0;
 						while ((int)logList_.size() > COMMENT_TRIMEND) {
 							logList_.pop_front(); ++trimCount;
@@ -5064,91 +4625,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							logListDisplayedSize_ = (int)logList_.size();
 						}
 					}
-				} else {
-					// フォールバック: リストボックス
-					int iSelItemIndex = ListBox_GetCurSel(hList);
-					if (logList_.size() < logListDisplayedSize_ || ListBox_GetCount(hList) != logListDisplayedSize_) {
-						ListBox_ResetContent(hList);
-						logListDisplayedSize_ = 0;
-					}
-					std::list<LOG_ELEM>::const_iterator it = logList_.end();
-					for (size_t i = logList_.size() - logListDisplayedSize_; i > 0; --i, --it);
-					for (; it != logList_.end(); ++it) {
-						COLORREF crMarker = it->type == LOG_ELEM_TYPE_MESSAGE ? RGB(0, 0, 0) :
-						                    it->type == LOG_ELEM_TYPE_DEFAULT || it->type == LOG_ELEM_TYPE_HIDE ? s_.crNicoMarker : s_.crRefugeMarker;
-						int markerPrefixLen = !_tcsncmp(it->marker, TEXT("a:"), 2) ? 2 : 0;
-						TCHAR text[256];
-						_stprintf_s(text, TEXT("%s[%u,%u,9]{00:00:00 (MMM)}%02d:%02d:%02d (%.3s)%s"),
-						            it->type == LOG_ELEM_TYPE_MESSAGE ? TEXT("#") : TEXT(""), static_cast<DWORD>(it->cr), static_cast<DWORD>(crMarker),
-						            it->st.wHour, it->st.wMinute, it->st.wSecond,
-						            it->marker + markerPrefixLen, &TEXT("   ")[min<size_t>(_tcslen(it->marker + markerPrefixLen), 3)]);
-						if (!it->bAbone) {
-							_tcsncpy_s(text + _tcslen(text), _countof(text) - _tcslen(text), it->text.c_str(), _TRUNCATE);
-						}
-						ListBox_AddString(hList, text);
-						++logListDisplayedSize_;
-					}
-					while (logList_.size() > COMMENT_TRIMEND) {
-						logList_.pop_front(); ListBox_DeleteString(hList, 0);
-						--logListDisplayedSize_; --iSelItemIndex; --iTopItemIndex;
-					}
-					if (iSelItemIndex < 0) { ListBox_SetTopIndex(hList, ListBox_GetCount(hList) - 1); }
-					else { ListBox_SetCurSel(hList, iSelItemIndex); ListBox_SetTopIndex(hList, max(iTopItemIndex, 0)); }
 				}
 			} else {
-				// 勢いリスト表示中
 				if (logWV2Ready_) {
-					// WebView2 パス: WM_SETREDRAW を戻してから早期リターン
-					SendMessage(hList, WM_SETREDRAW, TRUE, 0);
 					SendForceListWV2Update();
-					return TRUE;
 				}
-				// フォールバック: リストボックス
-				ULONGLONG nowTick = GetTickCount64();
-				for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
-					UpdateForceElemEventName(&*it, nowTick);
-					const tstring* pEventName = &it->eventName;
-					tstring wsEventName;
-					if (it->eventName.empty() && !programTitleMap_.empty()) {
-						auto pit = programTitleMap_.find(it->jkID);
-						if (pit != programTitleMap_.end() && !pit->second.empty()) {
-							wsEventName = pit->second;
-							pEventName = &wsEventName;
-						}
-					}
-					TCHAR text[256];
-					TCHAR fixedText[16];
-					tstring eventText = pEventName->empty() ? tstring() : tstring(TEXT(" ")) + *pEventName;
-					eventText.resize(min<size_t>(eventText.size(), 63));
-					if (it->force < 0) {
-						_stprintf_s(fixedText, TEXT("%03d 勢???"), it->jkID);
-						_stprintf_s(text, TEXT("[%u,%u,5,%u,%u]{%s}%s (%.63s%s%.2S)%.63s"),
-						            static_cast<DWORD>(RGB(0xFF, 0xFF, 0xFF)), static_cast<DWORD>(GetForceColor(it->force)),
-						            static_cast<DWORD>(RGB(0x9A, 0xCD, 0x32)), static_cast<UINT>(eventText.size()),
-						            fixedText, fixedText, it->name.c_str(),
-						            it->chatStreamID.empty() && it->refugeChatStreamID.empty() ? TEXT("") : TEXT("-"),
-						            (it->chatStreamID.empty() ? it->refugeChatStreamID : it->chatStreamID).c_str(),
-						            eventText.c_str());
-					} else {
-						_stprintf_s(fixedText, TEXT("%03d 勢%03d"), it->jkID, it->force);
-						_stprintf_s(text, TEXT("[%u,%u,5,%u,%u]{%s}%s (%.63s%s%.2S)%.63s"),
-						            static_cast<DWORD>(RGB(0xFF, 0xFF, 0xFF)), static_cast<DWORD>(GetForceColor(it->force)),
-						            static_cast<DWORD>(RGB(0x9A, 0xCD, 0x32)), static_cast<UINT>(eventText.size()),
-						            fixedText, fixedText, it->name.c_str(),
-						            it->chatStreamID.empty() && it->refugeChatStreamID.empty() ? TEXT("") : TEXT("-"),
-						            (it->chatStreamID.empty() ? it->refugeChatStreamID : it->chatStreamID).c_str(),
-						            eventText.c_str());
-					}
-					ListBox_AddString(hList, text);
-					if (it->jkID == currentJKToGet_) {
-						ListBox_SetCurSel(hList, ListBox_GetCount(hList) - 1);
-					}
-				}
-				ListBox_SetTopIndex(hList, iTopItemIndex);
 			}
-			// 描画を再開
-			SendMessage(hList, WM_SETREDRAW, TRUE, 0);
-			InvalidateRect(hList, nullptr, FALSE);
 		}
 		return TRUE;
 	case WMS_FORCE:
@@ -5508,13 +4990,19 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		// FALL THROUGH!
 	case WM_SIZE:
 		{
-			RECT rcParent, rc;
+			RECT rcParent;
 			GetClientRect(hwnd, &rcParent);
-			HWND hItem = GetDlgItem(hwnd, IDC_FORCELIST);
-			GetWindowRect(hItem, &rc);
-			MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&rc), 2);
 			{
-				int swShow = rcParent.bottom-rc.top < 10 ? SW_HIDE : SW_SHOW;
+				int dpi = m_pApp ? m_pApp->GetDPIFromWindow(hwnd) : 96;
+				if (dpi == 0) dpi = 96;
+				int space = 3 * dpi / 96;
+				int listPadding = hPanel_ ? 0 : space;
+				int buttonH = 24 * dpi / 96;
+				int listLeft = listPadding;
+				int listTop = listPadding + buttonH;
+				int listWidth = max(0, (int)(rcParent.right) - listLeft * 2);
+				int listHeight = max(0, (int)(rcParent.bottom) - listTop);
+				int swShow = listHeight < 10 ? SW_HIDE : SW_SHOW;
 				if (uMsg == WM_SHOWWINDOW || (GetWindowLong(GetDlgItem(hwnd, IDC_RADIO_FORCE), GWL_STYLE) & WS_VISIBLE ? true : false) != (swShow != SW_HIDE)) {
 					ShowWindow(GetDlgItem(hwnd, IDC_RADIO_FORCE), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_RADIO_LOG), swShow);
@@ -5527,19 +5015,15 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_POPUP), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_LOGIN), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_HELP), swShow);
-					}
+				}
+				if (pLogWV2Controller_) {
+					RECT wv2Bounds = { listLeft, listTop, listLeft + listWidth, listTop + listHeight };
+					if (wv2Bounds.right < wv2Bounds.left) wv2Bounds.right = wv2Bounds.left;
+					if (wv2Bounds.bottom < wv2Bounds.top) wv2Bounds.bottom = wv2Bounds.top;
+					pLogWV2Controller_->put_Bounds(wv2Bounds);
+					pLogWV2Controller_->put_IsVisible(logWV2Ready_ ? TRUE : FALSE);
+				}
 			}
-			SetWindowPos(hItem, nullptr, 0, 0, rcParent.right-rc.left*2, rcParent.bottom-rc.top, SWP_NOMOVE | SWP_NOZORDER);
-			// WebView2 をリストボックスと同じ矩形に配置、表示モードに応じて切り替え
-			if (pLogWV2Controller_) {
-				RECT wv2Bounds; GetWindowRect(hItem, &wv2Bounds);
-				MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&wv2Bounds), 2);
-				if (wv2Bounds.right < wv2Bounds.left) wv2Bounds.right = wv2Bounds.left;
-				if (wv2Bounds.bottom < wv2Bounds.top) wv2Bounds.bottom = wv2Bounds.top;
-				pLogWV2Controller_->put_Bounds(wv2Bounds);
-				pLogWV2Controller_->put_IsVisible(logWV2Ready_ ? TRUE : FALSE);
-			}
-			ShowWindow(hItem, logWV2Ready_ ? SW_HIDE : SW_SHOW);
 		}
 		break;
 	case WM_CTLCOLOREDIT:
