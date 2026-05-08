@@ -196,7 +196,6 @@ private:
 	static BOOL CALLBACK WindowMsgCallback(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT *pResult, void *pUserData);
 	bool ProcessChatTag(const char *tag, bool bShow = true, int showDelay = 0, bool *pbRefuge = nullptr);
 	void OutputMessageLog(LPCTSTR text);
-	void GetPostComboBoxText(LPTSTR comm, size_t commSize, LPTSTR mail = nullptr, size_t mailSize = 0);
 	void ProcessLocalPost(LPCTSTR comm);
 	bool BuildUserNGPattern(LPCTSTR marker, RPL_ELEM *pElem, tstring *pOldPattern);
 	int GetLogListNGState(int index);

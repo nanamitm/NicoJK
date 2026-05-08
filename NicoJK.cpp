@@ -1791,29 +1791,6 @@ void CNicoJK::OutputMessageLog(LPCTSTR text)
 	}
 }
 
-// コメント投稿欄の文字列を取得する
-void CNicoJK::GetPostComboBoxText(LPTSTR comm, size_t commSize, LPTSTR mail, size_t mailSize)
-{
-	TCHAR text[512];
-	if (!GetDlgItemText(hForce_, IDC_CB_POST, text, _countof(text))) {
-		text[0] = TEXT('\0');
-	}
-	if (mail) {
-		mail[0] = TEXT('\0');
-	}
-	// []で囲われた部分はmail属性値とする
-	size_t i = 0;
-	if (text[0] == TEXT('[')) {
-		i = _tcscspn(text, TEXT("]"));
-		if (text[i] == TEXT(']')) {
-			if (mail) {
-				_tcsncpy_s(mail, mailSize, &text[1], min(i - 1, mailSize - 1));
-			}
-			++i;
-		}
-	}
-	_tcsncpy_s(comm, commSize, &text[i], _TRUNCATE);
-}
 
 static LPCTSTR GetLocalCommandHelpText()
 {
@@ -3721,9 +3698,7 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	    CreateWindowEx(0, TEXT("BUTTON"), TEXT("?"), WS_CHILD | WS_VISIBLE,
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_HELP), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
-	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
-	    CreateWindowEx(0, TEXT("EDIT"), nullptr, WS_CHILD,
-	        0, -1, 1, 1, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr))
+	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr))
 	{
 		if (hForceFont_) {
 			SendDlgItemMessage(hwnd, IDC_RADIO_FORCE, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
@@ -4061,8 +4036,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                        std::wstring text = jstr(L"text");
 				                                        if (!text.empty()) {
 				                                            std::wstring full = mail.empty() ? text : (L"[" + mail + L"]" + text);
-				                                            SetDlgItemText(hwndCap, IDC_CB_POST, full.c_str());
-				                                            SendMessage(hwndCap, WM_POST_COMMENT, 0, 0);
+				                                            // lParam でテキストを直接渡す (IDC_CB_POST 経由不要)
+				                                            SendMessage(hwndCap, WM_POST_COMMENT, 0, reinterpret_cast<LPARAM>(full.c_str()));
 				                                            if (pLogWV2_ && logWV2Ready_)
 				                                                pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"clri\"}");
 				                                        }
@@ -5464,20 +5439,29 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		}
 		return TRUE;
 	case WM_POST_COMMENT:
+		// lParam: 投稿テキスト (LPCTSTR)。"[mail]comm" または "@localcmd" 形式
 		{
-			TCHAR comm[POST_COMMENT_MAX + 1];
-			if (GetDlgItemText(hwnd, IDC_CB_POST, comm, _countof(comm)) && comm[0] == TEXT('@')) {
-				// ローカルコマンドとして処理
-				ProcessLocalPost(&comm[1]);
-				// ローカルコマンドの場合も入力欄をクリア
-				SendDlgItemMessage(hwnd, IDC_CB_POST, EM_SETSEL, 0, static_cast<LPARAM>(-1));
-				SendDlgItemMessage(hwnd, IDC_CB_POST, WM_CLEAR, 0, 0);
+			if (!lParam) return TRUE;
+			const TCHAR* pFull = reinterpret_cast<const TCHAR*>(lParam);
+			// ローカルコマンド (@...) の処理
+			if (pFull[0] == TEXT('@')) {
+				ProcessLocalPost(&pFull[1]);
 				if (pLogWV2_ && logWV2Ready_)
 					pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"clri\"}");
 				return TRUE;
 			}
-			TCHAR mail[64];
-			GetPostComboBoxText(comm, _countof(comm), mail, _countof(mail));
+			// [mail]comm を解析
+			TCHAR comm[POST_COMMENT_MAX + 1] = {};
+			TCHAR mail[64] = {};
+			size_t i = 0;
+			if (pFull[0] == TEXT('[')) {
+				i = _tcscspn(pFull, TEXT("]"));
+				if (pFull[i] == TEXT(']')) {
+					_tcsncpy_s(mail, &pFull[1], min(i - 1, static_cast<size_t>(63)));
+					++i;
+				}
+			}
+			_tcsncpy_s(comm, _countof(comm), &pFull[i], _TRUNCATE);
 			if (GetTickCount() - lastPostTick_ < POST_COMMENT_INTERVAL) {
 				OutputMessageLog(TEXT("Error:投稿間隔が短すぎます。"));
 			} else if (_tcslen(comm) >= POST_COMMENT_MAX) {
@@ -5489,9 +5473,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				_stprintf_s(post, TEXT("[%s%s%s]%s"), mail, s_.bAnonymity ? TEXT(" 184") : TEXT(""),
 				            bPostToRefuge_ ? TEXT(" refuge") : TEXT(" nico"), comm);
 				size_t j = 0;
-				for (size_t i = 0; post[i]; ++i) {
+				for (size_t k = 0; post[k]; ++k) {
 					// Tab文字or改行->レコードセパレータ
-					post[j] = post[i] == TEXT('\t') || post[i] == TEXT('\n') ? TEXT('\x1e') : post[i];
+					post[j] = post[k] == TEXT('\t') || post[k] == TEXT('\n') ? TEXT('\x1e') : post[k];
 					if (post[j] != TEXT('\r')) ++j;
 				}
 				post[j] = TEXT('\0');
@@ -5502,10 +5486,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				// コメント投稿
 				if (jkStream_.Send(hwnd, WMS_JK, '+', u8post)) {
 					lastPostTick_ = GetTickCount();
-					GetPostComboBoxText(lastPostComm_, _countof(lastPostComm_));
-					// 入力欄をクリア
-					SendDlgItemMessage(hwnd, IDC_CB_POST, EM_SETSEL, 0, static_cast<LPARAM>(-1));
-					SendDlgItemMessage(hwnd, IDC_CB_POST, WM_CLEAR, 0, 0);
+					_tcscpy_s(lastPostComm_, comm);
 #ifdef _DEBUG
 					OutputDebugString(TEXT("##POST##"));
 					OutputDebugString(post);
