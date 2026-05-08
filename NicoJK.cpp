@@ -115,7 +115,8 @@ const UINT WM_TOGGLE_LOG_LIST_NG = WM_APP + 109;
 const UINT WM_GET_LOG_LIST_NG_STATE = WM_APP + 110;
 const UINT WMS_LOGIN_SETTINGS = WM_APP + 111;
 const UINT WMS_CHANNEL_WS    = WM_APP + 113;
-const UINT WMS_COMMENT_POPUP = WM_APP + 114;
+const UINT WMS_COMMENT_POPUP   = WM_APP + 114;
+const UINT WMS_FORCE_LIST_SEL  = WM_APP + 116;
 
 // コメントウィンドウ行高（CSS px）: ポップアップ 28px + 入力行 34px = 62px
 static const int COMMENT_POPUP_CSS_H = 28;
@@ -3688,11 +3689,11 @@ static const wchar_t* kLogHtml = LR"(<!DOCTYPE html><html><head><meta charset="U
 :root{--bg:#fff;--fg:#000;--sb:rgba(128,128,128,.45)}
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);font-size:12pt}
-#L{width:100%;height:100%;overflow-y:scroll;overflow-x:hidden}
-#L::-webkit-scrollbar{width:8px}
-#L::-webkit-scrollbar-track{background:transparent}
-#L::-webkit-scrollbar-thumb{background:var(--sb);border-radius:4px}
-#L::-webkit-scrollbar-thumb:hover{background:var(--fg);opacity:.5}
+#L,#F{width:100%;height:100%;overflow-y:scroll;overflow-x:hidden;position:absolute;top:0;left:0}
+#L::-webkit-scrollbar,#F::-webkit-scrollbar{width:8px}
+#L::-webkit-scrollbar-track,#F::-webkit-scrollbar-track{background:transparent}
+#L::-webkit-scrollbar-thumb,#F::-webkit-scrollbar-thumb{background:var(--sb);border-radius:4px}
+#L::-webkit-scrollbar-thumb:hover,#F::-webkit-scrollbar-thumb:hover{background:var(--fg);opacity:.5}
 .i{display:flex;align-items:baseline;padding:1px 3px;line-height:1.35;cursor:default;user-select:text;overflow:hidden}
 .i:hover{background:rgba(128,128,128,.1)}
 .i.s{outline:1px solid rgba(128,128,128,.4)}
@@ -3702,9 +3703,16 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .tx{white-space:nowrap;overflow:hidden;min-width:0;flex:1}
 .msg .tx{font-style:italic}
 .hide .tx,.refuge-hide .tx{text-decoration:line-through;opacity:.65}
-</style></head><body><div id="L"></div><script>
-const L=document.getElementById('L');
-let bot=true,sel=null;
+#F{display:none}
+.fi{display:flex;align-items:baseline;padding:2px 3px;line-height:1.35;cursor:default;user-select:none;overflow:hidden;white-space:nowrap}
+.fi:hover{background:rgba(128,128,128,.15)}
+.fi.sel{background:rgba(128,128,128,.22);outline:1px solid rgba(128,128,128,.4)}
+.ff{flex-shrink:0;min-width:5.5em;font-variant-numeric:tabular-nums;margin-right:.3em;font-size:.9em}
+.fn{flex-shrink:0;margin-right:.3em}
+.fe{flex:1;opacity:.7;overflow:hidden;min-width:0;font-size:.9em}
+</style></head><body><div id="L"></div><div id="F"></div><script>
+const L=document.getElementById('L'),F=document.getElementById('F');
+let bot=true,sel=null,fsel=null;
 L.addEventListener('scroll',()=>{bot=L.scrollTop+L.clientHeight>=L.scrollHeight-8;});
 L.addEventListener('contextmenu',e=>{
   e.preventDefault();const it=e.target.closest('.i');if(!it)return;
@@ -3725,15 +3733,31 @@ function add(d){
   if(d.tp==='msg')v.append(tm,tx);else v.append(tm,mk,tx);
   return v;
 }
+function fc(v){
+  if(v<0)return'#808080';
+  if(v<=50)return'#008000';
+  if(v<=100)return'#0080FF';
+  if(v<=200)return'#FF8000';
+  return'#FF0000';
+}
+F.addEventListener('click',e=>{
+  const fi=e.target.closest('.fi');if(!fi)return;
+  if(fsel)fsel.classList.remove('sel');
+  fsel=fi;fi.classList.add('sel');
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'fsel',id:+fi.dataset.id}));
+});
 window.chrome.webview.addEventListener('message',e=>{
   const msg=JSON.parse(e.data);
   if(msg.cmd==='upd'){
+    L.style.display='';F.style.display='none';
     for(let i=0;i<(msg.tr||0)&&L.firstChild;i++)L.removeChild(L.firstChild);
     (msg.it||[]).forEach(d=>L.appendChild(add(d)));if(bot)L.scrollTop=L.scrollHeight;
   }else if(msg.cmd==='rel'){
+    L.style.display='';F.style.display='none';
     L.innerHTML='';bot=true;sel=null;
     (msg.it||[]).forEach(d=>L.appendChild(add(d)));L.scrollTop=L.scrollHeight;
   }else if(msg.cmd==='clr'){
+    L.style.display='';F.style.display='none';
     L.innerHTML='';bot=true;sel=null;
   }else if(msg.cmd==='ab'){
     document.querySelectorAll('.i[data-m="'+CSS.escape(msg.m)+'"]').forEach(el=>{
@@ -3742,6 +3766,26 @@ window.chrome.webview.addEventListener('message',e=>{
       else{el.classList.remove('ab');if(tx)tx.textContent=el.dataset.t;}
     });
     if(sel){sel.classList.remove('s');sel=null;}
+  }else if(msg.cmd==='frc'){
+    L.style.display='none';F.style.display='';
+    const selId=msg.sel,frag=document.createDocumentFragment();
+    fsel=null;
+    (msg.items||[]).forEach(d=>{
+      const el=document.createElement('div');
+      el.className='fi'+(d.id===selId?' sel':'');
+      if(d.id===selId)fsel=el;
+      el.dataset.id=d.id;
+      const ff=document.createElement('span'),fn=document.createElement('span'),fe=document.createElement('span');
+      ff.className='ff';fn.className='fn';fe.className='fe';
+      ff.style.color=fc(d.fo);
+      const id3=(d.id+'').padStart(3,'0');
+      ff.textContent=d.fo<0?id3+' 勢???':id3+' 勢'+(d.fo+'').padStart(3,'0');
+      fn.textContent='('+d.nm+(d.cn?'-':'')+')';
+      fe.textContent=d.ev||'';
+      el.append(ff,fn,fe);
+      frag.appendChild(el);
+    });
+    F.innerHTML='';F.appendChild(frag);
   }else if(msg.cmd==='thm'){
     document.documentElement.style.setProperty('--bg',msg.bg);
     document.documentElement.style.setProperty('--fg',msg.fg);
@@ -3842,6 +3886,43 @@ void CNicoJK::SendLogWV2AboneUpdate(LPCTSTR marker, bool state)
 	swprintf_s(msg, L"{\"cmd\":\"ab\",\"m\":\"%s\",\"s\":%s}",
 	    LogJsonEsc(m).c_str(), state ? L"true" : L"false");
 	pLogWV2_->PostWebMessageAsString(msg);
+}
+
+void CNicoJK::SendForceListWV2Update()
+{
+	if (!pLogWV2_ || !logWV2Ready_) return;
+	ULONGLONG nowTick = GetTickCount64();
+	std::wstring json = L"{\"cmd\":\"frc\",\"sel\":";
+	json += std::to_wstring(currentJKToGet_);
+	json += L",\"items\":[";
+	bool first = true;
+	for (auto& it : forceList_) {
+		UpdateForceElemEventName(&it, nowTick);
+		const tstring* pEventName = &it.eventName;
+		tstring wsEventName;
+		if (it.eventName.empty() && !programTitleMap_.empty()) {
+			auto pit = programTitleMap_.find(it.jkID);
+			if (pit != programTitleMap_.end() && !pit->second.empty()) {
+				wsEventName = pit->second;
+				pEventName = &wsEventName;
+			}
+		}
+		if (!first) json += L",";
+		first = false;
+		json += L"{\"id\":";
+		json += std::to_wstring(it.jkID);
+		json += L",\"fo\":";
+		json += std::to_wstring(it.force);
+		json += L",\"nm\":\"";
+		json += LogJsonEsc(it.name.c_str());
+		json += L"\",\"cn\":";
+		json += (it.chatStreamID.empty() && it.refugeChatStreamID.empty()) ? L"false" : L"true";
+		json += L",\"ev\":\"";
+		json += LogJsonEsc(pEventName->c_str());
+		json += L"\"}";
+	}
+	json += L"]}";
+	pLogWV2_->PostWebMessageAsString(json.c_str());
 }
 
 // ---- channels WebSocket ヘルパー ----
@@ -4495,6 +4576,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                            }
 				                                        }
 				                                    }
+				                                    // 勢いリスト チャンネル選択
+				                                    if (s.find(L"\"cmd\":\"fsel\"") != std::wstring::npos) {
+				                                        PostMessage(hwndCap, WMS_FORCE_LIST_SEL, (WPARAM)jint(L"id"), 0);
+				                                        return S_OK;
+				                                    }
 				                                    // ダブルクリック NG 登録/解除
 				                                    if (s.find(L"\"cmd\":\"dbl\"") != std::wstring::npos) {
 				                                        if (logIdx >= 0) ToggleLogListNG(logIdx);
@@ -4535,10 +4621,14 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                    if (logWV2Ready_) return S_OK;
 				                                    logWV2Ready_ = true;
 				                                    ApplyLogWV2Theme();
-				                                    SendLogWV2Reload();
-				                                    logListDisplayedSize_ = (int)logList_.size();
-				                                    pLogWV2Controller_->put_IsVisible(bDisplayLogList_);
-				                                    ShowWindow(GetDlgItem(hwndCap, IDC_FORCELIST), bDisplayLogList_ ? SW_HIDE : SW_SHOW);
+				                                    if (bDisplayLogList_) {
+				                                        SendLogWV2Reload();
+				                                        logListDisplayedSize_ = (int)logList_.size();
+				                                    } else {
+				                                        SendForceListWV2Update();
+				                                    }
+				                                    pLogWV2Controller_->put_IsVisible(TRUE);
+				                                    ShowWindow(GetDlgItem(hwndCap, IDC_FORCELIST), SW_HIDE);
 				                                    RECT rc; GetClientRect(hwndCap, &rc);
 				                                    PostMessage(hwndCap, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
 				                                    return S_OK;
@@ -5098,8 +5188,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		case IDC_RADIO_FORCE:
 		case IDC_RADIO_LOG:
 			bDisplayLogList_ = SendDlgItemMessage(hwnd, IDC_RADIO_LOG, BM_GETCHECK, 0, 0 ) == BST_CHECKED;
-			if (pLogWV2Controller_) pLogWV2Controller_->put_IsVisible(bDisplayLogList_ && logWV2Ready_);
-			ShowWindow(GetDlgItem(hwnd, IDC_FORCELIST), bDisplayLogList_ && logWV2Ready_ ? SW_HIDE : SW_SHOW);
+			if (pLogWV2Controller_) pLogWV2Controller_->put_IsVisible(logWV2Ready_ ? TRUE : FALSE);
+			ShowWindow(GetDlgItem(hwnd, IDC_FORCELIST), logWV2Ready_ ? SW_HIDE : SW_SHOW);
 			SendMessage(hwnd, WM_UPDATE_LIST, TRUE, 0);
 			PostMessage(hwnd, WM_TIMER, TIMER_UPDATE, 0);
 			break;
@@ -5635,12 +5725,16 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				}
 			} else {
 				// 勢いリスト表示中
+				if (logWV2Ready_) {
+					// WebView2 パス: WM_SETREDRAW を戻してから早期リターン
+					SendMessage(hList, WM_SETREDRAW, TRUE, 0);
+					SendForceListWV2Update();
+					return TRUE;
+				}
+				// フォールバック: リストボックス
 				ULONGLONG nowTick = GetTickCount64();
 				for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
 					UpdateForceElemEventName(&*it, nowTick);
-					// TVTest EPG が空の場合 channels WebSocket の番組情報で補完
-					// programTitleMap_ の値は表示専用: it->eventName に書き戻すと次回レンダリング時に
-					// 古いタイトルが残り programs 更新が反映されなくなるため pEventName で参照する
 					const tstring* pEventName = &it->eventName;
 					tstring wsEventName;
 					if (it->eventName.empty() && !programTitleMap_.empty()) {
@@ -5724,6 +5818,51 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 		}
 		return TRUE;
+	case WMS_FORCE_LIST_SEL:
+		// WebView2 勢いリストのチャンネル選択（LBN_SELCHANGE と同じ処理）
+		if (pThis && !pThis->bDisplayLogList_) {
+			int jkID = static_cast<int>(wParam);
+			if (pThis->currentJKToGet_ != jkID) {
+				pThis->currentJKToGet_ = jkID;
+				pThis->jkStream_.Shutdown();
+				pThis->commentWindow_.ClearChat();
+				SetTimer(hwnd, TIMER_JK_WATCHDOG, JK_WATCHDOG_RECONNEC_DELAY, nullptr);
+			}
+			if (pThis->s_.bSetChannel && !pThis->bUsingLogfileDriver_ && !pThis->bRecording_ && jkID > 0) {
+				int spaceNum = 0;
+				pThis->m_pApp->GetTuningSpace(&spaceNum);
+				const DWORD currentNtsID = pThis->GetCurrentNetworkServiceID();
+				bool bSelected = false;
+				for (int currentTuning = 0; currentTuning < spaceNum && !bSelected; ++currentTuning) {
+					for (int stage = 0; stage < 2 && !bSelected; ++stage) {
+						DWORD ntsID;
+						for (int i = 0; pThis->GetChannelNetworkServiceID(currentTuning, i, &ntsID); ++i) {
+							auto it = LowerBoundNetworkServiceID(pThis->ntsIDList_.begin(), pThis->ntsIDList_.end(), ntsID);
+							int chJK = it != pThis->ntsIDList_.end() && it->ntsID == ntsID ? it->jkID : -1;
+							if ((stage > 0 || (chJK & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) && jkID == (chJK & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
+								if (ntsID != currentNtsID) {
+									TVTest::ChannelSelectInfo cinfo = {};
+									cinfo.Size = sizeof(cinfo);
+									cinfo.Flags = TVTest::CHANNEL_SELECT_FLAG_STRICTSERVICE;
+									cinfo.Space = -1;
+									cinfo.Channel = -1;
+									if ((ntsID & 0xFFFF) == 0x000F) {
+										cinfo.Space = currentTuning;
+									} else {
+										cinfo.NetworkID = static_cast<WORD>(ntsID & 0xFFFF);
+									}
+									cinfo.ServiceID = static_cast<WORD>(ntsID >> 16);
+									pThis->m_pApp->SelectChannel(&cinfo);
+								}
+								bSelected = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+		return 0;
 	case WMS_CHANNEL_WS:
 		{
 			if (!wParam) {
@@ -6029,9 +6168,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				if (wv2Bounds.right < wv2Bounds.left) wv2Bounds.right = wv2Bounds.left;
 				if (wv2Bounds.bottom < wv2Bounds.top) wv2Bounds.bottom = wv2Bounds.top;
 				pLogWV2Controller_->put_Bounds(wv2Bounds);
-				pLogWV2Controller_->put_IsVisible(bDisplayLogList_ && logWV2Ready_);
+				pLogWV2Controller_->put_IsVisible(logWV2Ready_ ? TRUE : FALSE);
 			}
-			ShowWindow(hItem, bDisplayLogList_ && logWV2Ready_ ? SW_HIDE : SW_SHOW);
+			ShowWindow(hItem, logWV2Ready_ ? SW_HIDE : SW_SHOW);
 		}
 		break;
 	case WM_CTLCOLOREDIT:

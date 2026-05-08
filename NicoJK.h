@@ -233,6 +233,7 @@ private:
 	void SendLogWV2Reload();
 	void ApplyLogWV2Theme();
 	void SendLogWV2AboneUpdate(LPCTSTR marker, bool state);
+	void SendForceListWV2Update();
 	static BOOL CALLBACK StreamCallback(BYTE *pData, void *pClientData);
 
 	// 設定ファイルの名前
