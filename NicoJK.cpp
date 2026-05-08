@@ -3780,7 +3780,7 @@ window.chrome.webview.addEventListener('message',e=>{
       ff.style.color=fc(d.fo);
       const id3=(d.id+'').padStart(3,'0');
       ff.textContent=d.fo<0?id3+' 勢???':id3+' 勢'+(d.fo+'').padStart(3,'0');
-      fn.textContent='('+d.nm+(d.cn?'-':'')+')';
+      fn.textContent='('+d.nm+(d.si?'-'+d.si:'')+')';
       fe.textContent=d.ev||'';
       el.append(ff,fn,fe);
       frag.appendChild(el);
@@ -3915,9 +3915,12 @@ void CNicoJK::SendForceListWV2Update()
 		json += std::to_wstring(it.force);
 		json += L",\"nm\":\"";
 		json += LogJsonEsc(it.name.c_str());
-		json += L"\",\"cn\":";
-		json += (it.chatStreamID.empty() && it.refugeChatStreamID.empty()) ? L"false" : L"true";
-		json += L",\"ev\":\"";
+		// 接続中ストリームの先頭2文字を si として送信
+		const std::string& sid = it.chatStreamID.empty() ? it.refugeChatStreamID : it.chatStreamID;
+		json += L"\",\"si\":\"";
+		for (int i = 0; i < 2 && i < (int)sid.size(); ++i)
+			json += static_cast<wchar_t>(static_cast<unsigned char>(sid[i]));
+		json += L"\",\"ev\":\"";
 		json += LogJsonEsc(pEventName->c_str());
 		json += L"\"}";
 	}
