@@ -3747,7 +3747,9 @@ F.addEventListener('click',e=>{
   window.chrome.webview.postMessage(JSON.stringify({cmd:'fsel',id:+fi.dataset.id}));
 });
 window.chrome.webview.addEventListener('message',e=>{
-  const msg=JSON.parse(e.data);
+  let msg;
+  try{msg=JSON.parse(e.data);}
+  catch(err){document.body.style.background='red';return;}
   if(msg.cmd==='upd'){
     L.style.display='';F.style.display='none';
     for(let i=0;i<(msg.tr||0)&&L.firstChild;i++)L.removeChild(L.firstChild);
@@ -3767,6 +3769,7 @@ window.chrome.webview.addEventListener('message',e=>{
     });
     if(sel){sel.classList.remove('s');sel=null;}
   }else if(msg.cmd==='frc'){
+    document.body.style.background='lime'; // デバッグ: frc受信確認
     L.style.display='none';F.style.display='';
     const selId=msg.sel,frag=document.createDocumentFragment();
     fsel=null;
