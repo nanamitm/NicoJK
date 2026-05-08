@@ -115,12 +115,7 @@ const UINT WM_TOGGLE_LOG_LIST_NG = WM_APP + 109;
 const UINT WM_GET_LOG_LIST_NG_STATE = WM_APP + 110;
 const UINT WMS_LOGIN_SETTINGS = WM_APP + 111;
 const UINT WMS_CHANNEL_WS    = WM_APP + 113;
-const UINT WMS_COMMENT_POPUP   = WM_APP + 114;
 const UINT WMS_FORCE_LIST_SEL  = WM_APP + 116;
-
-// コメントウィンドウ行高（CSS px）: ポップアップ 28px + 入力行 34px = 62px
-static const int COMMENT_POPUP_CSS_H = 28;
-static const int COMMENT_BASE_CSS_H  = 34;
 
 const UINT ID_FORCE_LIST_COPY = 1;
 const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
@@ -370,7 +365,6 @@ CNicoJK::CNicoJK()
 	, hPanel_(nullptr)
 	, hPanelPopup_(nullptr)
 	, hForce_(nullptr)
-	, hForcePostEditBox_(nullptr)
 	, hForceTooltip_(nullptr)
 	, hHelpWindow_(nullptr)
 	, hHelpEdit_(nullptr)
@@ -380,9 +374,6 @@ CNicoJK::CNicoJK()
 	, hLoginOtpEdit_(nullptr)
 	, hLoginStatus_(nullptr)
 	, hLoginLastLogin_(nullptr)
-	, hCommentWindow_(nullptr)
-	, hCommentEdit_(nullptr)
-	, hbrForcePostEditBox_(nullptr)
 	, hForceFont_(nullptr)
 	, pDWriteFactory_(nullptr)
 	, pD2DFactory_(nullptr)
@@ -507,17 +498,6 @@ bool CNicoJK::Initialize()
 	wcLogin.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 	wcLogin.lpszClassName = TEXT("ru.jk.login");
 	if (RegisterClassEx(&wcLogin) == 0) {
-		return false;
-	}
-	WNDCLASSEX wcComment = {};
-	wcComment.cbSize = sizeof(wcComment);
-	wcComment.style = CS_HREDRAW | CS_VREDRAW;
-	wcComment.lpfnWndProc = CommentWindowProc;
-	wcComment.hInstance = g_hinstDLL;
-	wcComment.hCursor = LoadCursor(nullptr, IDC_ARROW);
-	wcComment.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-	wcComment.lpszClassName = TEXT("ru.jk.commentpost");
-	if (RegisterClassEx(&wcComment) == 0) {
 		return false;
 	}
 	// 初期化処理
@@ -718,10 +698,6 @@ bool CNicoJK::TogglePlugin(bool bEnabled)
 		if (hForceFont_) {
 			DeleteFont(hForceFont_);
 			hForceFont_ = nullptr;
-		}
-		if (hbrForcePostEditBox_) {
-			DeleteBrush(hbrForcePostEditBox_);
-			hbrForcePostEditBox_ = nullptr;
 		}
 		return true;
 	}
@@ -1916,32 +1892,8 @@ void CNicoJK::ShowNicoLoginWindow()
 
 void CNicoJK::ShowCommentWindow()
 {
-	if (!hCommentWindow_) {
-		RECT rc = {};
-		if (hForce_) GetWindowRect(hForce_, &rc);
-		int x = rc.left ? rc.left + 16 : CW_USEDEFAULT;
-		int y = rc.top  ? rc.top  + 16 : CW_USEDEFAULT;
-		// 縦サイズを DPI から計算（WM_SIZING でも固定するが初期値も正確にする）
-		int dpi = m_pApp ? m_pApp->GetSystemDPI() : 96;
-		if (dpi == 0) dpi = 96;
-		int clientH = COMMENT_BASE_CSS_H * dpi / 96;
-		RECT rcAdj = { 0, 0, 440, clientH };
-		AdjustWindowRectEx(&rcAdj, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX, FALSE, WS_EX_TOOLWINDOW);
-		hCommentWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.commentpost"), TEXT("NicoJK - コメント投稿"),
-		                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
-		                                 x, y, rcAdj.right - rcAdj.left, rcAdj.bottom - rcAdj.top,
-		                                 hForce_, nullptr, g_hinstDLL, this);
-	}
-	if (hCommentWindow_) {
-		UpdateWindowTheme();
-		ShowWindow(hCommentWindow_, SW_SHOWNORMAL);
-		SetForegroundWindow(hCommentWindow_);
-		if (pWV2Controller_ && wv2Ready_) {
-			pWV2Controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
-		} else if (hCommentEdit_) {
-			SetFocus(hCommentEdit_);
-		}
-	}
+	if (pLogWV2_ && logWV2Ready_)
+		pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"focus_input\"}");
 }
 
 void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
@@ -2248,7 +2200,7 @@ void CNicoJK::ProcessLocalPost(LPCTSTR comm)
 			bPostToRefuge_ = !bPostToRefuge_;
 			bPostToRefugeInverted_ = false;
 			InvalidateRect(hForce_, nullptr, FALSE);
-			ApplyWV2Theme();
+			ApplyLogWV2Theme();
 		}
 		TCHAR text[64];
 		_stprintf_s(text, TEXT("現在の投稿先は%sです。"),
@@ -2634,66 +2586,6 @@ static LRESULT CALLBACK ForceListBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 }
 
 // サブクラス化した投稿欄のプロシージャ
-static LRESULT CALLBACK ForcePostEditBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-	switch (uMsg) {
-	case WM_CHAR:
-		if (wParam == VK_RETURN) {
-			// 改行入力
-			if ((lParam & 0x40000000) == 0) {
-				SendMessage(static_cast<HWND>(GetProp(hwnd, TEXT("Root"))), WM_POST_COMMENT, 0, 0);
-			}
-			return 0;
-		} else if (wParam == 0x16) {
-			// Ctrl+'V'入力
-			HWND hwndRoot = static_cast<HWND>(GetProp(hwnd, TEXT("Root")));
-			int len = GetWindowTextLength(GetDlgItem(hwndRoot, IDC_CB_POST));
-			LONG selRange = static_cast<LONG>(SendDlgItemMessage(hwndRoot, IDC_CB_POST, CB_GETEDITSEL, 0, 0));
-			// 入力欄が空になるときだけ処理
-			if (len == 0 || MAKELONG(0, len) == selRange) {
-				// クリップボードを取得
-				TCHAR clip[512];
-				clip[0] = TEXT('\0');
-				if (OpenClipboard(nullptr)) {
-					HGLOBAL hg = GetClipboardData(CF_UNICODETEXT);
-					if (hg) {
-						LPWSTR pg = static_cast<LPWSTR>(GlobalLock(hg));
-						if (pg) {
-							_tcsncpy_s(clip, pg, _TRUNCATE);
-							GlobalUnlock(hg);
-						}
-					}
-					CloseClipboard();
-				}
-				// 改行->レコードセパレータ
-				LPTSTR q = clip;
-				bool bLF = false;
-				bool bMultiLine = false;
-				for (LPCTSTR p = q; *p; ++p) {
-					if (*p == TEXT('\n')) {
-						*q++ = TEXT('\x1e');
-						bLF = true;
-					} else if (*p != TEXT('\r')) {
-						*q++ = *p;
-						bMultiLine = bLF;
-					}
-				}
-				*q = TEXT('\0');
-				// 複数行のペーストだけ独自に処理
-				if (bMultiLine) {
-					SetDlgItemText(hwndRoot, IDC_CB_POST, clip);
-					SendMessage(hwndRoot, WM_COMMAND, MAKEWPARAM(IDC_CB_POST, CBN_EDITCHANGE), 0);
-					return 0;
-				}
-			}
-		}
-		break;
-	case WM_GETDLGCODE:
-		// 本体のアクセラレータを抑制するため
-		return DLGC_WANTALLKEYS;
-	}
-	return CallWindowProc(reinterpret_cast<WNDPROC>(GetProp(hwnd, TEXT("DefProc"))), hwnd, uMsg, wParam, lParam);
-}
 
 // サブクラス化したボタンのプロシージャ
 static LRESULT CALLBACK TVTestPanelButtonProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -3204,466 +3096,6 @@ LRESULT CALLBACK CNicoJK::LoginButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
 	return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-LRESULT CALLBACK CNicoJK::CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
-{
-	if (uMsg == WM_KEYDOWN && wParam == VK_RETURN) {
-		SendMessage(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(IDC_COMMENT_SEND, BN_CLICKED), 0);
-		return 0;
-	}
-	if (uMsg == WM_NCDESTROY) {
-		RemoveWindowSubclass(hwnd, CommentEditSubclassProc, uIdSubclass);
-	}
-	return DefSubclassProc(hwnd, uMsg, wParam, lParam);
-}
-
-
-static std::wstring BuildCommentInputHTML(LPCWSTR fontName, int fontSize)
-{
-	wchar_t szFontSize[16];
-	swprintf_s(szFontSize, L"%dpt", fontSize);
-
-	std::wstring html =
-		L"<!DOCTYPE html><html><head><meta charset='UTF-8'><style>"
-		L"*{margin:0;padding:0;box-sizing:border-box}"
-		L"html,body{width:100%;height:100%;overflow:hidden;position:relative;"
-		L"background:var(--bg,#fff);color:var(--fg,#000);"
-		L"font-family:'Segoe UI Emoji','";
-	html += fontName;
-	html += L"',sans-serif;font-size:";
-	html += szFontSize;
-	html +=
-		L"}"
-		// ポップアップパネル（上部絶対配置、ウィンドウ展開時のみ表示）
-		L"#pp{position:absolute;top:0;left:0;right:0;height:28px;"
-		L"display:flex;align-items:center;gap:3px;padding:0 5px;"
-		L"border-bottom:1px solid rgba(128,128,128,0.3);visibility:hidden}"
-		// 色ボタン（円形）
-		L".cc{width:16px;height:16px;border-radius:50%;cursor:pointer;flex-shrink:0;border:2px solid transparent}"
-		L".cc.on{box-shadow:0 0 0 2px var(--fg,#000)}"
-		L".c0{background:#fff;border-color:#aaa}"
-		L".c1{background:#e00}"
-		L".c2{background:#f7a}"
-		L".c3{background:#f80}"
-		L".c4{background:#fd0}"
-		L".c5{background:#0b0}"
-		L".c6{background:#0cc}"
-		L".c7{background:#00e}"
-		L".c8{background:#808}"
-		L".c9{background:#222}"
-		// 区切り線
-		L".sp{width:1px;height:14px;background:var(--fg,#000);opacity:0.25;flex-shrink:0}"
-		// 位置・サイズ トグルボタン
-		L".tb{flex-shrink:0;padding:0 4px;height:16px;line-height:16px;"
-		L"border:1px solid var(--fg,#000);border-radius:3px;cursor:pointer;"
-		L"background:transparent;color:var(--fg,#000);font-size:9pt;opacity:0.6}"
-		L".tb.on{background:var(--fg,#000);color:var(--bg,#fff);opacity:1}"
-		// メイン行（コマンドボタン + 入力欄、下部絶対固定）
-		L"#mn{position:absolute;bottom:0;left:0;right:0;height:34px;"
-		L"display:flex;align-items:center;padding:3px 5px;gap:4px;z-index:1}"
-		// コマンドボタン（選択状態を三角文字+色で表示）
-		L"#cb{flex-shrink:0;width:26px;height:27px;"
-		L"border:1px solid rgba(128,128,128,0.6);border-radius:4px;"
-		L"cursor:pointer;background:transparent;color:inherit;"
-		L"font-size:13pt;line-height:1;font-family:inherit;"
-		L"display:flex;align-items:center;justify-content:center}"
-		L"#cb.open{background:rgba(128,128,128,0.15)}"
-		// テキスト入力欄
-		L"#c{flex:1;height:27px;border:1px solid rgba(128,128,128,0.5);border-radius:3px;"
-		L"padding:1px 5px;background:transparent;color:inherit;"
-		L"outline:none;font-family:inherit;font-size:inherit}"
-		L"</style></head><body>"
-		// ポップアップ（上部、ウィンドウ展開時のみ見える）
-		L"<div id='pp'>"
-		L"<div class='cc c0 on' data-c='' title='白'></div>"
-		L"<div class='cc c1' data-c='red' title='赤'></div>"
-		L"<div class='cc c2' data-c='pink' title='ピンク'></div>"
-		L"<div class='cc c3' data-c='orange' title='橙'></div>"
-		L"<div class='cc c4' data-c='yellow' title='黄'></div>"
-		L"<div class='cc c5' data-c='green' title='緑'></div>"
-		L"<div class='cc c6' data-c='cyan' title='水色'></div>"
-		L"<div class='cc c7' data-c='blue' title='青'></div>"
-		L"<div class='cc c8' data-c='purple' title='紫'></div>"
-		L"<div class='cc c9' data-c='black' title='黒'></div>"
-		L"<div class='sp'></div>"
-		L"<button class='tb on' data-p=''>流</button>"
-		L"<button class='tb' data-p='ue'>上</button>"
-		L"<button class='tb' data-p='shita'>下</button>"
-		L"<div class='sp'></div>"
-		L"<button class='tb' data-s='big'>大</button>"
-		L"<button class='tb on' data-s=''>普</button>"
-		L"<button class='tb' data-s='small'>小</button>"
-		L"</div>"
-		// メイン行（常時表示）
-		L"<div id='mn'>"
-		L"<button id='cb' title='コマンド選択'>▷</button>"
-		L"<input id='c' type='text' maxlength='75'>"
-		L"</div>"
-		L"<script>"
-		// 三角文字マッピング: TR[位置][サイズ]
-		L"var TR={'':{'':'▷','big':'▶','small':'▹'},"
-		L"'ue':{'':'△','big':'▲','small':'▵'},"
-		L"'shita':{'':'▽','big':'▼','small':'▿'}};"
-		// 色のCSS値 (空文字=テーマ色をそのまま使用)
-		L"var CL={'':'','red':'#d00','pink':'#e88','orange':'#e70',"
-		L"'yellow':'#b90','green':'#090','cyan':'#088',"
-		L"'blue':'#00b','purple':'#707','black':'#555'};"
-		// 選択状態・ポップアップ開閉フラグ
-		L"var sc='',sp='',ss='',po=false;"
-		L"var cb=document.getElementById('cb');"
-		L"var c=document.getElementById('c');"
-		L"var pp=document.getElementById('pp');"
-		// コマンドボタン表示更新: 三角文字+文字色+枠色を選択状態に連動
-		L"function upd(){"
-		L"cb.textContent=TR[sp][ss];"
-		L"var col=CL[sc];"
-		L"cb.style.color=col||'';"
-		L"cb.style.borderColor=col?col+'99':'';"
-		L"}"
-		// ポップアップ開閉トグル
-		L"function tog(){"
-		L"po=!po;"
-		L"cb.classList.toggle('open',po);"
-		L"if(!po){pp.style.visibility='hidden';}"  // 閉じる際は即非表示
-		L"window.chrome.webview.postMessage(po?'popup:1':'popup:0');"
-		L"}"
-		// コマンドボタンクリック: フォーカスを奪わず開閉
-		L"cb.addEventListener('mousedown',function(e){e.preventDefault();});"
-		L"cb.addEventListener('click',tog);"
-		// ポップアップ内クリックでもフォーカスを奪わない
-		L"pp.addEventListener('mousedown',function(e){e.preventDefault();});"
-		// 色ボタン
-		L"var cbs=[...document.querySelectorAll('[data-c]')];"
-		L"cbs.forEach(function(b){b.addEventListener('click',function(){"
-		L"sc=b.dataset.c;"
-		L"cbs.forEach(function(x){x.classList.toggle('on',x.dataset.c===sc);});"
-		L"upd();});});"
-		// 位置ボタン
-		L"var pbs=[...document.querySelectorAll('[data-p]')];"
-		L"pbs.forEach(function(b){b.addEventListener('click',function(){"
-		L"sp=b.dataset.p;"
-		L"pbs.forEach(function(x){x.classList.toggle('on',x.dataset.p===sp);});"
-		L"upd();});});"
-		// サイズボタン
-		L"var sbs=[...document.querySelectorAll('[data-s]')];"
-		L"sbs.forEach(function(b){b.addEventListener('click',function(){"
-		L"ss=b.dataset.s;"
-		L"sbs.forEach(function(x){x.classList.toggle('on',x.dataset.s===ss);});"
-		L"upd();});});"
-		// Enter で投稿: "cmd\ntext" 形式
-		L"c.addEventListener('keydown',function(e){"
-		L"if(e.key==='Enter'&&!e.isComposing){"
-		L"if(c.value){"
-		L"var cmd=[sc,sp,ss].filter(Boolean).join(' ');"
-		L"window.chrome.webview.postMessage(cmd+'\\n'+c.value);"
-		L"}"
-		L"e.preventDefault();"
-		L"}});"
-		// 入力欄フォーカス時にポップアップを閉じる
-		L"c.addEventListener('focus',function(){"
-		L"if(po){po=false;cb.classList.remove('open');"
-		L"pp.style.visibility='hidden';"
-		L"window.chrome.webview.postMessage('popup:0');}});"
-		// C++ → JS メッセージ受信
-		L"window.chrome.webview.addEventListener('message',function(e){"
-		L"if(e.data==='clear'){c.value='';}"
-		L"else if(e.data==='focus'){c.focus();}"
-		L"else if(e.data==='popup_ready'){pp.style.visibility='visible';}"
-		L"else if(e.data.startsWith('theme:')){"
-		L"var p=e.data.slice(6).split(',');"
-		L"document.documentElement.style.setProperty('--bg',p[0]);"
-		L"document.documentElement.style.setProperty('--fg',p[1]);"
-		L"document.body.style.background=p[0];"
-		L"document.body.style.color=p[1];"
-		L"}});"
-		L"upd();"  // 初期ボタン表示
-		L"</script></body></html>";
-	return html;
-}
-
-LRESULT CALLBACK CNicoJK::CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-	if (uMsg == WM_CREATE) {
-		CNicoJK *pThis = reinterpret_cast<CNicoJK*>(reinterpret_cast<LPCREATESTRUCT>(lParam)->lpCreateParams);
-		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
-		if (!pThis) return 0;
-		pThis->hCommentWindow_ = hwnd;
-
-		// WebView2 非同期作成
-		// ユーザーデータフォルダ: NicoJK.ini と同じディレクトリに _webview2 サフィックスで作成
-		std::wstring udPath = pThis->iniFileName_;
-		size_t dot = udPath.rfind(L'.');
-		if (dot != std::wstring::npos) udPath = udPath.substr(0, dot);
-		udPath += L"_webview2";
-
-		HWND hwndCap = hwnd;
-		std::wstring html = BuildCommentInputHTML(pThis->s_.forceFontName, pThis->s_.forceFontSize);
-
-		CreateCoreWebView2EnvironmentWithOptions(nullptr, udPath.c_str(), nullptr,
-		    Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-		        [pThis, hwndCap, html](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
-		            if (FAILED(hr) || !env || !IsWindow(hwndCap)) {
-		                // WebView2 利用不可: フォールバックとして plain EDIT コントロールを作成
-		                HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), nullptr,
-		                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-		                    0, 0, 0, 0, hwndCap,
-		                    reinterpret_cast<HMENU>(IDC_COMMENT_EDIT), g_hinstDLL, nullptr);
-		                if (hEdit) {
-		                    pThis->hCommentEdit_ = hEdit;
-		                    SendMessage(hEdit, EM_SETLIMITTEXT, POST_COMMENT_MAX - 1, 0);
-		                    SetWindowSubclass(hEdit, CommentEditSubclassProc, 1, 0);
-		                    HFONT hF = pThis->hForceFont_ ?
-		                        pThis->hForceFont_ :
-		                        reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-		                    SendMessage(hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hF), TRUE);
-		                    RECT rc; GetClientRect(hwndCap, &rc);
-		                    PostMessage(hwndCap, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
-		                }
-		                return S_OK;
-		            }
-		            env->CreateCoreWebView2Controller(hwndCap,
-		                Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-		                    [pThis, hwndCap, html](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
-		                        if (FAILED(hr) || !ctrl || !IsWindow(hwndCap)) return S_OK;
-
-		                        pThis->pWV2Controller_ = ctrl;
-		                        ctrl->get_CoreWebView2(&pThis->pWV2_);
-
-		                        // コンテキストメニュー・ズーム・DevTools を無効化
-		                        Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
-		                        if (SUCCEEDED(pThis->pWV2_->get_Settings(&settings)) && settings) {
-		                            settings->put_AreDefaultContextMenusEnabled(FALSE);
-		                            settings->put_IsZoomControlEnabled(FALSE);
-		                            settings->put_AreDevToolsEnabled(FALSE);
-		                        }
-
-		                        // JS → C++ メッセージ受信ハンドラ
-		                        pThis->pWV2_->add_WebMessageReceived(
-		                            Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-		                                [pThis, hwndCap](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
-		                                    LPWSTR msg = nullptr;
-		                                    args->TryGetWebMessageAsString(&msg);
-		                                    if (msg && IsWindow(hwndCap)) {
-		                                        if (wcscmp(msg, L"popup:1") == 0)
-		                                            PostMessage(hwndCap, WMS_COMMENT_POPUP, 1, 0);
-		                                        else if (wcscmp(msg, L"popup:0") == 0)
-		                                            PostMessage(hwndCap, WMS_COMMENT_POPUP, 0, 0);
-		                                        else if (msg[0] && wcschr(msg, L'\n'))
-		                                            pThis->OnWV2CommentSend(hwndCap, msg);
-		                                    }
-		                                    CoTaskMemFree(msg);
-		                                    return S_OK;
-		                                }).Get(), &pThis->wv2MsgToken_);
-
-		                        // ページ読み込み完了後にサイズ・テーマ・フォーカスを適用
-		                        pThis->pWV2_->add_NavigationCompleted(
-		                            Callback<ICoreWebView2NavigationCompletedEventHandler>(
-		                                [pThis, hwndCap](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
-		                                    if (pThis->wv2Ready_) return S_OK; // 初回のみ
-		                                    pThis->wv2Ready_ = true;
-		                                    // テーマ適用
-		                                    pThis->ApplyWV2Theme();
-		                                    // コントロール配置
-		                                    RECT rc; GetClientRect(hwndCap, &rc);
-		                                    PostMessage(hwndCap, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
-		                                    // 表示中なら入力欄にフォーカス
-		                                    if (IsWindowVisible(hwndCap) && pThis->pWV2Controller_) {
-		                                        pThis->pWV2Controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
-		                                    }
-		                                    return S_OK;
-		                                }).Get(), nullptr);
-
-		                        // 初期サイズを仮設定（NavigationCompleted で正式適用）
-		                        RECT rcClient; GetClientRect(hwndCap, &rcClient);
-		                        ctrl->put_Bounds(rcClient);
-
-		                        pThis->pWV2_->NavigateToString(html.c_str());
-		                        return S_OK;
-		                    }).Get());
-		            return S_OK;
-		        }).Get());
-		return 0;
-	}
-
-	CNicoJK *pThis = reinterpret_cast<CNicoJK*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-
-	switch (uMsg) {
-	case WM_SIZE:
-		if (pThis) {
-			RECT rc = {};
-			GetClientRect(hwnd, &rc);
-			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
-			if (dpi == 0) dpi = 96;
-			int margin = 6 * dpi / 96;
-			int editH  = 24 * dpi / 96;
-			if (pThis->pWV2Controller_ && pThis->wv2Ready_) {
-				// ツールバー+入力欄を含む HTML が全面を使う
-				RECT wv2Rect = { 0, 0, rc.right, rc.bottom };
-				pThis->pWV2Controller_->put_Bounds(wv2Rect);
-			} else if (HWND hEdit = GetDlgItem(hwnd, IDC_COMMENT_EDIT)) {
-				MoveWindow(hEdit, margin, margin, rc.right - margin * 2, editH, TRUE);
-			}
-		}
-		return 0;
-	case WM_COMMAND:
-		// IDC_COMMENT_SEND は フォールバック EDIT の Enter キー (CommentEditSubclassProc) から送られる
-		if (LOWORD(wParam) == IDC_COMMENT_SEND && pThis && pThis->hForce_ && pThis->hCommentEdit_) {
-			int len = GetWindowTextLength(pThis->hCommentEdit_);
-			if (len <= 0) break;
-			std::vector<TCHAR> text(len + 1);
-			GetWindowText(pThis->hCommentEdit_, text.data(), len + 1);
-			SetDlgItemText(pThis->hForce_, IDC_CB_POST, text.data());
-			SendMessage(pThis->hForce_, WM_POST_COMMENT, 0, 0);
-			SetWindowText(pThis->hCommentEdit_, TEXT(""));
-		}
-		break;
-	case WM_CLOSE:
-		ShowWindow(hwnd, SW_HIDE);
-		return 0;
-	case WM_SHOWWINDOW:
-		if (wParam && pThis) {
-			if (!pThis->panelColor_.GetPanelBackBrush()) {
-				pThis->panelColor_.SetColor(pThis->m_pApp);
-			}
-			if (pThis->hCommentEdit_) {
-				SendMessage(pThis->hCommentEdit_, EM_SETBKGNDCOLOR,
-				    pThis->panelColor_.IsDark() ? 0 : 1,
-				    pThis->panelColor_.GetPanelBack());
-			} else if (pThis->pWV2_ && pThis->wv2Ready_) {
-				pThis->ApplyWV2Theme();
-			}
-		}
-		break;
-	case WM_ERASEBKGND:
-		if (pThis) {
-			if (!pThis->panelColor_.GetPanelBackBrush()) {
-				pThis->panelColor_.SetColor(pThis->m_pApp);
-			}
-			RECT rc = {};
-			GetClientRect(hwnd, &rc);
-			FillRect(reinterpret_cast<HDC>(wParam), &rc, pThis->panelColor_.GetPanelBackBrush());
-			return TRUE;
-		}
-		break;
-	case WM_CTLCOLORSTATIC:
-	case WM_CTLCOLORBTN:
-		if (pThis) {
-			if (!pThis->panelColor_.GetPanelBackBrush()) {
-				pThis->panelColor_.SetColor(pThis->m_pApp);
-			}
-			SetTextColor(reinterpret_cast<HDC>(wParam), pThis->panelColor_.GetPanelText());
-			SetBkColor(reinterpret_cast<HDC>(wParam), pThis->panelColor_.GetPanelBack());
-			return reinterpret_cast<LRESULT>(pThis->panelColor_.GetPanelBackBrush());
-		}
-		break;
-	case WMS_COMMENT_POPUP:
-		// JS からのポップアップ開閉要求: ウィンドウを上方向に拡縮する
-		if (pThis) {
-			bool open = (wParam != 0);
-			if (open == pThis->commentPopupOpen_) break;
-			pThis->commentPopupOpen_ = open;
-			RECT rc;
-			GetWindowRect(hwnd, &rc);
-			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
-			if (dpi == 0) dpi = 96;
-			int popupH = COMMENT_POPUP_CSS_H * dpi / 96;
-			if (open) {
-				// 上方向に展開: top を popupH 分上げ、height を popupH 分増やす
-				SetWindowPos(hwnd, nullptr,
-				    rc.left, rc.top - popupH,
-				    rc.right - rc.left, rc.bottom - rc.top + popupH,
-				    SWP_NOZORDER);
-				// 展開完了を JS に通知 → JS が #pp を表示する
-				if (pThis->pWV2_ && pThis->wv2Ready_)
-					pThis->pWV2_->PostWebMessageAsString(L"popup_ready");
-			} else {
-				// 上方向に縮小: top を popupH 分下げ、height を popupH 分減らす
-				SetWindowPos(hwnd, nullptr,
-				    rc.left, rc.top + popupH,
-				    rc.right - rc.left, rc.bottom - rc.top - popupH,
-				    SWP_NOZORDER);
-			}
-		}
-		return 0;
-	case WM_SIZING:
-		// 縦サイズを固定：ドラッグ中に高さを補正
-		if (pThis) {
-			RECT *pr = reinterpret_cast<RECT*>(lParam);
-			int dpi = pThis->m_pApp ? pThis->m_pApp->GetDPIFromWindow(hwnd) : 96;
-			if (dpi == 0) dpi = 96;
-			int clientH = (pThis->commentPopupOpen_
-			    ? COMMENT_BASE_CSS_H + COMMENT_POPUP_CSS_H
-			    : COMMENT_BASE_CSS_H) * dpi / 96;
-			RECT rcAdj = { 0, 0, 0, clientH };
-			AdjustWindowRectEx(&rcAdj, static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_STYLE)), FALSE,
-			    static_cast<DWORD>(GetWindowLongPtr(hwnd, GWL_EXSTYLE)));
-			int fixedH = rcAdj.bottom - rcAdj.top;
-			if (wParam == WMSZ_TOP || wParam == WMSZ_TOPLEFT || wParam == WMSZ_TOPRIGHT)
-				pr->top = pr->bottom - fixedH;
-			else
-				pr->bottom = pr->top + fixedH;
-			return TRUE;
-		}
-		break;
-	case WM_DESTROY:
-		if (pThis) {
-			if (pThis->pWV2_) {
-				pThis->pWV2_->remove_WebMessageReceived(pThis->wv2MsgToken_);
-			}
-			if (pThis->pWV2Controller_) {
-				pThis->pWV2Controller_->Close();
-			}
-			pThis->pWV2_.Reset();
-			pThis->pWV2Controller_.Reset();
-			pThis->wv2Ready_ = false;
-			pThis->commentPopupOpen_ = false;
-			pThis->hCommentWindow_ = nullptr;
-			pThis->hCommentEdit_ = nullptr;
-		}
-		break;
-	}
-	return DefWindowProc(hwnd, uMsg, wParam, lParam);
-}
-
-void CNicoJK::OnWV2CommentSend(HWND hwndComment, LPCWSTR msg)
-{
-	// JS から "cmd\ntext" 形式で受信する (cmd は "red ue big" のようなスペース区切り、空文字可)
-	// GetPostComboBoxText は "[cmd]text" を mail="cmd", comm="text" に分解する
-	if (!msg || !hForce_) return;
-	const wchar_t* nl = wcschr(msg, L'\n');
-	const wchar_t* text = nl ? nl + 1 : msg;
-	if (!text[0]) return;
-	std::wstring cmd = nl ? std::wstring(msg, nl) : L"";
-	std::wstring full = cmd.empty() ? text : (L"[" + cmd + L"]" + text);
-	SetDlgItemText(hForce_, IDC_CB_POST, full.c_str());
-	SendMessage(hForce_, WM_POST_COMMENT, 0, 0);
-	if (pWV2_) pWV2_->PostWebMessageAsString(L"clear");
-}
-
-void CNicoJK::ApplyWV2Theme()
-{
-	if (!pWV2_ || !wv2Ready_) return;
-	if (!panelColor_.GetPanelBackBrush()) return;
-	COLORREF back, text;
-	if (s_.bRefugeMixing) {
-		COLORREF cr = bPostToRefuge_ ? s_.crRefugeEditBox : s_.crNicoEditBox;
-		if (cr != RGB(0xFF, 0xFF, 0xFF)) {
-			back = cr;
-			text = GetBrightness(cr) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
-		} else {
-			back = panelColor_.GetPanelBack();
-			text = panelColor_.GetPanelText();
-		}
-	} else {
-		back = panelColor_.GetPanelBack();
-		text = panelColor_.GetPanelText();
-	}
-	wchar_t msg[64];
-	swprintf_s(msg, L"theme:#%02X%02X%02X,#%02X%02X%02X",
-	    GetRValue(back), GetGValue(back), GetBValue(back),
-	    GetRValue(text), GetGValue(text), GetBValue(text));
-	pWV2_->PostWebMessageAsString(msg);
-}
-
 // ---- WebView2 ログ表示ヘルパー ----
 
 static std::wstring LogColorToHex(COLORREF cr) {
@@ -3691,7 +3123,8 @@ static std::wstring LogJsonEsc(const wchar_t* s) {
 static const wchar_t* kLogHtml = LR"(<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
 :root{--bg:#fff;--fg:#000;--sb:rgba(128,128,128,.45)}
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);font-size:12pt}
+html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);font-size:12pt;display:flex;flex-direction:column}
+#la{flex:1;position:relative;overflow:hidden}
 #L,#F{width:100%;height:100%;overflow-y:scroll;overflow-x:hidden;position:absolute;top:0;left:0}
 #L::-webkit-scrollbar,#F::-webkit-scrollbar{width:8px}
 #L::-webkit-scrollbar-track,#F::-webkit-scrollbar-track{background:transparent}
@@ -3713,9 +3146,61 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .ff{flex-shrink:0;min-width:5.5em;font-variant-numeric:tabular-nums;margin-right:.3em;font-size:.9em}
 .fn{flex-shrink:0;margin-right:.3em}
 .fe{flex:1;color:#9acd32;overflow:hidden;min-width:0;font-size:.9em}
-</style></head><body><div id="L"></div><div id="F"></div><script>
+#pp{position:absolute;bottom:34px;left:0;right:0;height:28px;display:flex;align-items:center;gap:3px;padding:0 5px;background:var(--bg);border-top:1px solid rgba(128,128,128,.3);visibility:hidden;z-index:10}
+.cc{width:16px;height:16px;border-radius:50%;cursor:pointer;flex-shrink:0;border:2px solid transparent}
+.cc.on{box-shadow:0 0 0 2px var(--fg,#000)}
+.c0{background:#fff;border-color:#aaa}
+.c1{background:#e00}
+.c2{background:#f7a}
+.c3{background:#f80}
+.c4{background:#fd0}
+.c5{background:#0b0}
+.c6{background:#0cc}
+.c7{background:#00e}
+.c8{background:#808}
+.c9{background:#222}
+.sp{width:1px;height:14px;background:var(--fg,#000);opacity:.25;flex-shrink:0}
+.tb{flex-shrink:0;padding:0 4px;height:16px;line-height:16px;border:1px solid var(--fg,#000);border-radius:3px;cursor:pointer;background:transparent;color:var(--fg,#000);font-size:9pt;opacity:.6}
+.tb.on{background:var(--fg,#000);color:var(--bg,#fff);opacity:1}
+#mn{flex-shrink:0;height:34px;display:flex;align-items:center;padding:3px 5px;gap:4px;border-top:1px solid rgba(128,128,128,.15)}
+#cb{flex-shrink:0;width:26px;height:27px;border:1px solid rgba(128,128,128,.6);border-radius:4px;cursor:pointer;background:transparent;color:inherit;font-size:13pt;line-height:1;font-family:inherit;display:flex;align-items:center;justify-content:center}
+#cb.open{background:rgba(128,128,128,.15)}
+#c{flex:1;height:27px;border:1px solid rgba(128,128,128,.5);border-radius:3px;padding:1px 5px;background:transparent;color:inherit;outline:none;font-family:inherit;font-size:inherit}
+</style></head><body>
+<div id="la">
+<div id="L"></div><div id="F"></div>
+</div>
+<div id="pp">
+<div class="cc c0 on" data-c="" title="白"></div>
+<div class="cc c1" data-c="red" title="赤"></div>
+<div class="cc c2" data-c="pink" title="ピンク"></div>
+<div class="cc c3" data-c="orange" title="橙"></div>
+<div class="cc c4" data-c="yellow" title="黄"></div>
+<div class="cc c5" data-c="green" title="緑"></div>
+<div class="cc c6" data-c="cyan" title="水色"></div>
+<div class="cc c7" data-c="blue" title="青"></div>
+<div class="cc c8" data-c="purple" title="紫"></div>
+<div class="cc c9" data-c="black" title="黒"></div>
+<div class="sp"></div>
+<button class="tb on" data-p="">流</button>
+<button class="tb" data-p="ue">上</button>
+<button class="tb" data-p="shita">下</button>
+<div class="sp"></div>
+<button class="tb" data-s="big">大</button>
+<button class="tb on" data-s="">普</button>
+<button class="tb" data-s="small">小</button>
+</div>
+<div id="mn">
+<button id="cb" title="コマンド選択">▷</button>
+<input id="c" type="text" maxlength="75">
+</div>
+<script>
 const L=document.getElementById('L'),F=document.getElementById('F');
-let bot=true,sel=null,fsel=null;
+const la=document.getElementById('la'),pp=document.getElementById('pp');
+const cb=document.getElementById('cb'),c=document.getElementById('c');
+let bot=true,sel=null,fsel=null,sc='',sp='',ss='',po=false;
+const TR={'':{'':'▷','big':'▶','small':'▹'},'ue':{'':'△','big':'▲','small':'▵'},'shita':{'':'▽','big':'▼','small':'▿'}};
+const CL={'':'','red':'#d00','pink':'#e88','orange':'#e70','yellow':'#b90','green':'#090','cyan':'#088','blue':'#00b','purple':'#707','black':'#555'};
 L.addEventListener('scroll',()=>{bot=L.scrollTop+L.clientHeight>=L.scrollHeight-8;});
 L.addEventListener('contextmenu',e=>{
   e.preventDefault();const it=e.target.closest('.i');if(!it)return;
@@ -3749,18 +3234,49 @@ F.addEventListener('click',e=>{
   fsel=fi;fi.classList.add('sel');
   window.chrome.webview.postMessage(JSON.stringify({cmd:'fsel',id:+fi.dataset.id}));
 });
+function upd(){
+  cb.textContent=TR[sp][ss];
+  const col=CL[sc];
+  cb.style.color=col||'';
+  cb.style.borderColor=col?col+'99':'';
+}
+function tog(){
+  po=!po;
+  cb.classList.toggle('open',po);
+  pp.style.visibility=po?'visible':'hidden';
+}
+cb.addEventListener('mousedown',e=>e.preventDefault());
+cb.addEventListener('click',tog);
+pp.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();});
+la.addEventListener('mousedown',()=>{if(po){po=false;cb.classList.remove('open');pp.style.visibility='hidden';}});
+const cbs=[...document.querySelectorAll('[data-c]')];
+cbs.forEach(b=>b.addEventListener('click',()=>{sc=b.dataset.c;cbs.forEach(x=>x.classList.toggle('on',x.dataset.c===sc));upd();}));
+const pbs=[...document.querySelectorAll('[data-p]')];
+pbs.forEach(b=>b.addEventListener('click',()=>{sp=b.dataset.p;pbs.forEach(x=>x.classList.toggle('on',x.dataset.p===sp));upd();}));
+const sbs=[...document.querySelectorAll('[data-s]')];
+sbs.forEach(b=>b.addEventListener('click',()=>{ss=b.dataset.s;sbs.forEach(x=>x.classList.toggle('on',x.dataset.s===ss));upd();}));
+c.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.isComposing){
+    if(c.value){
+      const parts=[sc,sp,ss].filter(Boolean);
+      window.chrome.webview.postMessage(JSON.stringify({cmd:'post',mail:parts.join(' '),text:c.value}));
+    }
+    e.preventDefault();
+  }
+});
+c.addEventListener('focus',()=>{if(po){po=false;cb.classList.remove('open');pp.style.visibility='hidden';}});
 window.chrome.webview.addEventListener('message',e=>{
   const msg=JSON.parse(e.data);
   if(msg.cmd==='upd'){
-    L.style.display='';F.style.display='none';
+    L.style.display='block';F.style.display='none';
     for(let i=0;i<(msg.tr||0)&&L.firstChild;i++)L.removeChild(L.firstChild);
     (msg.it||[]).forEach(d=>L.appendChild(add(d)));if(bot)L.scrollTop=L.scrollHeight;
   }else if(msg.cmd==='rel'){
-    L.style.display='';F.style.display='none';
+    L.style.display='block';F.style.display='none';
     L.innerHTML='';bot=true;sel=null;
     (msg.it||[]).forEach(d=>L.appendChild(add(d)));L.scrollTop=L.scrollHeight;
   }else if(msg.cmd==='clr'){
-    L.style.display='';F.style.display='none';
+    L.style.display='block';F.style.display='none';
     L.innerHTML='';bot=true;sel=null;
   }else if(msg.cmd==='ab'){
     document.querySelectorAll('.i[data-m="'+CSS.escape(msg.m)+'"]').forEach(el=>{
@@ -3789,6 +3305,10 @@ window.chrome.webview.addEventListener('message',e=>{
       frag.appendChild(el);
     });
     F.innerHTML='';F.appendChild(frag);
+  }else if(msg.cmd==='clri'){
+    c.value='';
+  }else if(msg.cmd==='focus_input'){
+    c.focus();
   }else if(msg.cmd==='thm'){
     document.documentElement.style.setProperty('--bg',msg.bg);
     document.documentElement.style.setProperty('--fg',msg.fg);
@@ -3799,6 +3319,7 @@ window.chrome.webview.addEventListener('message',e=>{
     document.body.style.fontFamily="'Segoe UI Emoji','"+msg.nm+"',sans-serif";
   }
 });
+upd();
 </script></body></html>)";
 
 std::wstring CNicoJK::LogElemToJson(const LOG_ELEM& e) const
@@ -4187,8 +3708,8 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 	        (left += buttonWidth), hPanel_ ? padding + space : -height, buttonWidth, height - space * 2, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_COMMENT), g_hinstDLL, nullptr) &&
 	    CreateWindowEx(WS_EX_ACCEPTFILES, TEXT("LISTBOX"), nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOTIFY,
 	        padding, padding + height, 100, 100, hwnd, reinterpret_cast<HMENU>(IDC_FORCELIST), g_hinstDLL, nullptr) &&
-	    CreateWindowEx(0, TEXT("COMBOBOX"), nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS | CBS_OWNERDRAWFIXED,
-	        padding, padding + height + 100, 100, 50, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr))
+	    CreateWindowEx(0, TEXT("EDIT"), nullptr, WS_CHILD,
+	        0, -1, 1, 1, hwnd, reinterpret_cast<HMENU>(IDC_CB_POST), g_hinstDLL, nullptr))
 	{
 		if (hForceFont_) {
 			SendDlgItemMessage(hwnd, IDC_RADIO_FORCE, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
@@ -4203,7 +3724,6 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 			SendDlgItemMessage(hwnd, IDC_BUTTON_HELP, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_BUTTON_COMMENT, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 			SendDlgItemMessage(hwnd, IDC_FORCELIST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
-			SendDlgItemMessage(hwnd, IDC_CB_POST, WM_SETFONT, reinterpret_cast<WPARAM>(hForceFont_), 0);
 		}
 		hForceTooltip_ = CreateWindowEx(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_ALWAYSTIP,
 		                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -4229,7 +3749,7 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 		addToolTip(IDC_BUTTON_POPUP, TEXT("ポップアップ表示を切り替える"));
 		addToolTip(IDC_BUTTON_LOGIN, TEXT("ニコニコログイン"));
 		addToolTip(IDC_BUTTON_HELP, TEXT("ローカルコマンドヘルプ"));
-		addToolTip(IDC_BUTTON_COMMENT, TEXT("コメント投稿ウィンドウ"));
+		addToolTip(IDC_BUTTON_COMMENT, TEXT("コメント入力欄にフォーカス"));
 		return true;
 	}
 	return false;
@@ -4294,31 +3814,8 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 	}
 	bool bDark = panelColor_.IsDark();
 	HWND hList = GetDlgItem(hwndForce, IDC_FORCELIST);
-	HWND hCombo = GetDlgItem(hwndForce, IDC_CB_POST);
 	if (hList) {
 		SetWindowTheme(hList, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-	}
-	if (hCombo) {
-		COMBOBOXINFO cbi = {};
-		cbi.cbSize = sizeof(cbi);
-		DWORD selStart = 0;
-		DWORD selEnd = 0;
-		bool bDropDown = (GetWindowLong(hCombo, GWL_STYLE) & 3) == CBS_DROPDOWN;
-		if (bDropDown) {
-			SendMessage(hCombo, CB_GETEDITSEL, reinterpret_cast<WPARAM>(&selStart), reinterpret_cast<LPARAM>(&selEnd));
-		}
-		SetWindowTheme(hCombo, bDark ? L"DarkMode_CFD" : nullptr, nullptr);
-		if (GetComboBoxInfo(hCombo, &cbi)) {
-			if (cbi.hwndItem) {
-				SetWindowTheme(cbi.hwndItem, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-			}
-			if (cbi.hwndList) {
-				SetWindowTheme(cbi.hwndList, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-			}
-		}
-		if (bDropDown) {
-			SendMessage(hCombo, CB_SETEDITSEL, selStart, selEnd);
-		}
 	}
 	if (hForceTooltip_) {
 		SetWindowTheme(hForceTooltip_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
@@ -4351,30 +3848,6 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 		BOOL bDarkBool = bDark ? TRUE : FALSE;
 		::DwmSetWindowAttribute(hPanelPopup_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
 		SetWindowPos(hPanelPopup_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-	}
-	if (hCommentWindow_) {
-		BOOL bDarkBool = bDark ? TRUE : FALSE;
-		::DwmSetWindowAttribute(hCommentWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkBool, sizeof(bDarkBool));
-		SetWindowTheme(hCommentWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-		if (hCommentEdit_) {
-			SendMessage(hCommentEdit_, EM_SETBKGNDCOLOR, bDark ? 0 : 1, panelColor_.GetPanelBack());
-			if (bDark) {
-				CHARFORMAT2 cf = {};
-				cf.cbSize = sizeof(cf);
-				cf.dwMask = CFM_COLOR;
-				cf.crTextColor = panelColor_.GetPanelText();
-				SendMessage(hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
-			} else {
-				CHARFORMAT2 cf = {};
-				cf.cbSize = sizeof(cf);
-				cf.dwMask = CFM_COLOR;
-				cf.dwEffects = CFE_AUTOCOLOR;
-				SendMessage(hCommentEdit_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
-			}
-		} else {
-			ApplyWV2Theme();
-		}
-		InvalidateRect(hCommentWindow_, nullptr, TRUE);
 	}
 	ApplyLogWV2Theme();
 	DeleteBrush(SetClassLongPtr(hwndForce, GCLP_HBRBACKGROUND,
@@ -4422,7 +3895,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			SendDlgItemMessage(hwnd, IDC_CHECK_RELATIVE, BM_SETCHECK, s_.bSetRelative ? BST_CHECKED : BST_UNCHECKED, 0);
 			SendDlgItemMessage(hwnd, IDC_SLIDER_OPACITY, TBM_SETRANGE, TRUE, MAKELPARAM(0, 10));
 			SendDlgItemMessage(hwnd, IDC_SLIDER_OPACITY, TBM_SETPOS, TRUE, (commentWindow_.GetOpacity() * 10 + 254) / 255);
-			SendMessage(hwnd, WM_COMMAND, MAKEWPARAM(IDC_CB_POST, CBN_EDITCHANGE), 0);
 			SetTimer(hwnd, TIMER_UPDATE, max(UPDATE_FORCE_INTERVAL, 10000), nullptr);
 			if (s_.timerInterval >= 0) {
 				SetTimer(hwnd, TIMER_FORWARD, s_.timerInterval, nullptr);
@@ -4454,16 +3926,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			SetProp(hList, TEXT("DefProc"), reinterpret_cast<HANDLE>(GetWindowLongPtr(hList, GWLP_WNDPROC)));
 			RemoveProp(hList, TEXT("IsLogList"));
 			SetWindowLongPtr(hList, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ForceListBoxProc));
-			// 投稿欄のサブクラス化
-			hForcePostEditBox_ = nullptr;
-			COMBOBOXINFO cbi = {};
-			cbi.cbSize = sizeof(cbi);
-			if (GetComboBoxInfo(GetDlgItem(hwnd, IDC_CB_POST), &cbi)) {
-				SetProp(cbi.hwndItem, TEXT("Root"), hwnd);
-				SetProp(cbi.hwndItem, TEXT("DefProc"), reinterpret_cast<HANDLE>(GetWindowLongPtr(cbi.hwndItem, GWLP_WNDPROC)));
-				SetWindowLongPtr(cbi.hwndItem, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ForcePostEditBoxProc));
-				hForcePostEditBox_ = cbi.hwndItem;
-			}
 			// パネルアイテムのサブクラス化
 			if (hPanel_) {
 				SetTVTestPanelItem(GetDlgItem(hwnd, IDC_RADIO_FORCE), m_pApp, TVTestPanelButtonProc);
@@ -4581,6 +4043,19 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                                if (marker == m) { logIdx = i; break; }
 				                                            }
 				                                        }
+				                                    }
+				                                    // コメント投稿
+				                                    if (s.find(L"\"cmd\":\"post\"") != std::wstring::npos) {
+				                                        std::wstring mail = jstr(L"mail");
+				                                        std::wstring text = jstr(L"text");
+				                                        if (!text.empty()) {
+				                                            std::wstring full = mail.empty() ? text : (L"[" + mail + L"]" + text);
+				                                            SetDlgItemText(hwndCap, IDC_CB_POST, full.c_str());
+				                                            SendMessage(hwndCap, WM_POST_COMMENT, 0, 0);
+				                                            if (pLogWV2_ && logWV2Ready_)
+				                                                pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"clri\"}");
+				                                        }
+				                                        return S_OK;
 				                                    }
 				                                    // 勢いリスト チャンネル選択
 				                                    if (s.find(L"\"cmd\":\"fsel\"") != std::wstring::npos) {
@@ -4718,19 +4193,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				hLoginStatus_ = nullptr;
 				hLoginLastLogin_ = nullptr;
 			}
-			if (hCommentWindow_) {
-				DestroyWindow(hCommentWindow_);
-				hCommentWindow_ = nullptr;
-				hCommentEdit_ = nullptr;
-			}
-			// 投稿欄のサブクラス化を解除
-			COMBOBOXINFO cbi = {};
-			cbi.cbSize = sizeof(cbi);
-			if (GetComboBoxInfo(GetDlgItem(hwnd, IDC_CB_POST), &cbi)) {
-				SetWindowLongPtr(cbi.hwndItem, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GetProp(cbi.hwndItem, TEXT("DefProc"))));
-				RemoveProp(cbi.hwndItem, TEXT("DefProc"));
-				RemoveProp(cbi.hwndItem, TEXT("Root"));
-			}
 			// 勢いリストのサブクラス化を解除
 			HWND hList = GetDlgItem(hwnd, IDC_FORCELIST);
 			RemoveProp(hList, TEXT("IsLogList"));
@@ -4795,7 +4257,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 	case WM_MEASUREITEM:
 		{
 			LPMEASUREITEMSTRUCT lpmis = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
-			if ((lpmis->CtlID == IDC_FORCELIST || lpmis->CtlID == IDC_CB_POST) && hForceFont_) {
+			if (lpmis->CtlID == IDC_FORCELIST && hForceFont_) {
 				HWND hItem = GetDlgItem(hwnd, lpmis->CtlID);
 				HDC hdc = GetDC(hItem);
 				HFONT hFontOld = SelectFont(hdc, hForceFont_);
@@ -4837,15 +4299,15 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 	case WM_DRAWITEM:
 		{
 			LPDRAWITEMSTRUCT lpdis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
-			if (lpdis->CtlType == ODT_LISTBOX || lpdis->CtlType == ODT_COMBOBOX) {
+			if (lpdis->CtlType == ODT_LISTBOX) {
 				bool bSelected = (lpdis->itemState & ODS_SELECTED) != 0;
 				bool bPanelDraw = hPanel_ && panelColor_.GetPanelBackBrush() && panelColor_.GetPanelCurTabBackBrush();
 				COLORREF crItemBack = bPanelDraw ?
 					(bSelected ? panelColor_.GetPanelCurTabBack() : panelColor_.GetPanelBack()) :
-					(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : lpdis->CtlType == ODT_COMBOBOX ? GetSysColor(COLOR_WINDOW) : GetBkColor(lpdis->hDC));
+					(bSelected ? GetSysColor(COLOR_HIGHLIGHT) : GetBkColor(lpdis->hDC));
 				COLORREF crItemText = bPanelDraw ?
 					(bSelected ? panelColor_.GetPanelCurTabText() : panelColor_.GetPanelText()) :
-					(bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : lpdis->CtlType == ODT_COMBOBOX ? GetSysColor(COLOR_WINDOWTEXT) : GetTextColor(lpdis->hDC));
+					(bSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetTextColor(lpdis->hDC));
 				HBRUSH hbrItemBack = bPanelDraw ?
 					(bSelected ? panelColor_.GetPanelCurTabBackBrush() : panelColor_.GetPanelBackBrush()) : nullptr;
 
@@ -5123,61 +4585,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							}
 						}
 					}
-				} else { // ODT_COMBOBOX
-					HBRUSH hbr = hbrItemBack ? hbrItemBack : CreateSolidBrush(crItemBack);
-					FillRect(hdcMem, &rcMem, hbr);
-					if (!hbrItemBack) {
-						DeleteBrush(hbr);
-					}
-
-					TCHAR text[512];
-					if ((int)lpdis->itemID >= 0 &&
-					    SendDlgItemMessage(hwnd, IDC_CB_POST, CB_GETLBTEXT,
-					                      lpdis->itemID, reinterpret_cast<LPARAM>(text)) >= 0)
-					{
-						COLORREF crText = crItemText;
-						// rc は memDC 座標系 (0 起点)
-						RECT rc = {2, 0, itemW, itemH};
-
-						if (pD2DTarget_ && pDWriteFormat_ && ContainsEmoji(text) &&
-						    SUCCEEDED(pD2DTarget_->BindDC(hdcMem, &rcMem))) {
-							pD2DTarget_->BeginDraw();
-							pD2DTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-							IDWriteTextLayout *pLayout = nullptr;
-							int layoutW = max<int>(itemW - rc.left, 1);
-							int layoutH = max(itemH, 1);
-							if (SUCCEEDED(pDWriteFactory_->CreateTextLayout(
-									text, (UINT32)_tcslen(text), pDWriteFormat_,
-									(float)layoutW, (float)layoutH, &pLayout))) {
-								D2D1_COLOR_F col = D2D1::ColorF(GetRValue(crText)/255.f,
-								                                 GetGValue(crText)/255.f,
-								                                 GetBValue(crText)/255.f);
-								ColorEmojiTextRendererNJ renderer(pDWriteFactory_, pD2DTarget_, col);
-								DWRITE_TEXT_METRICS met = {};
-								pLayout->GetMetrics(&met);
-								float y = (float)rc.top + max(((float)itemH - met.height) / 2.0f, 0.0f);
-								pLayout->Draw(nullptr, &renderer, (float)rc.left, y);
-								pLayout->Release();
-							}
-							if (FAILED(pD2DTarget_->EndDraw())) {
-								pD2DTarget_->Release(); pD2DTarget_ = nullptr;
-								if (pD2DFactory_) {
-									D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-										D2D1_RENDER_TARGET_TYPE_DEFAULT,
-										D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-										96.0f, 96.0f);
-									pD2DFactory_->CreateDCRenderTarget(&props, &pD2DTarget_);
-								}
-							}
-						} else {
-							int oldBkMode = SetBkMode(hdcMem, TRANSPARENT);
-							COLORREF crOld = SetTextColor(hdcMem, crText);
-							DrawText(hdcMem, text, -1, &rc,
-							         DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | DT_VCENTER);
-							SetTextColor(hdcMem, crOld);
-							SetBkMode(hdcMem, oldBkMode);
-						}
-					}
 				}
 
 				BitBlt(lpdis->hDC, lpdis->rcItem.left, lpdis->rcItem.top,
@@ -5281,29 +4688,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				ToggleLogListNG(index);
 			}
 			break;
-		case IDC_CB_POST:
-			if (HIWORD(wParam) == CBN_EDITCHANGE) {
-				// コメント装飾例を作成する
-				TCHAR comm[POST_COMMENT_MAX + 32];
-				GetPostComboBoxText(comm, _countof(comm));
-				while (SendDlgItemMessage(hwnd, IDC_CB_POST, CB_DELETESTRING, 0, 0) > 0);
-				for (LPCTSTR p = s_.mailDecorations.c_str(); *p; ) {
-					size_t len = _tcscspn(p, TEXT(":"));
-					TCHAR text[_countof(comm) + 64];
-					_tcsncpy_s(text, p, min<size_t>(len, 63));
-					_tcscat_s(text, comm);
-					SendDlgItemMessage(hwnd, IDC_CB_POST, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
-					p += p[len] ? len + 1 : len;
-				}
-				// 文字数警告する
-				int excess = static_cast<int>(_tcslen(comm)) - (POST_COMMENT_MAX - 1);
-				if (excess > 0) {
-					TCHAR text[64];
-					_stprintf_s(text, TEXT("Warning:%d文字を超えています(+%d)。"), POST_COMMENT_MAX - 1, excess);
-					OutputMessageLog(text);
-				}
-			}
-			break;
 		case IDC_BUTTON_OPACITY_DOWN:
 			SetOpacity(hwnd, max((commentWindow_.GetOpacity() * 10 + 254) / 255 - 1, 0) * 255 / 10);
 			break;
@@ -5323,7 +4707,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			ShowLocalCommandHelp();
 			break;
 		case IDC_BUTTON_COMMENT:
-			ShowCommentWindow();
+			if (pLogWV2_ && logWV2Ready_)
+				pLogWV2_->PostWebMessageAsString(L"{\"cmd\":\"focus_input\"}");
 			break;
 		}
 		break;
@@ -5391,14 +4776,14 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 								bPostToRefuge_ = !bPostToRefuge_;
 								bPostToRefugeInverted_ = false;
 								InvalidateRect(hwnd, nullptr, FALSE);
-								ApplyWV2Theme();
+								ApplyLogWV2Theme();
 							}
 							if (!bMix && !bPostToRefuge_) {
 								// 一時的に投稿先を変える
 								bPostToRefuge_ = true;
 								bPostToRefugeInverted_ = true;
 								InvalidateRect(hwnd, nullptr, FALSE);
-								ApplyWV2Theme();
+								ApplyLogWV2Theme();
 							}
 							// 過去のコメントの出力状態をリセット
 							bNicoReceivingPastChat_ = false;
@@ -5418,14 +4803,14 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 								bPostToRefuge_ = !bPostToRefuge_;
 								bPostToRefugeInverted_ = false;
 								InvalidateRect(hwnd, nullptr, FALSE);
-								ApplyWV2Theme();
+								ApplyLogWV2Theme();
 							}
 							if (bPostToRefuge_) {
 								// 一時的に投稿先を変える
 								bPostToRefuge_ = false;
 								bPostToRefugeInverted_ = true;
 								InvalidateRect(hwnd, nullptr, FALSE);
-								ApplyWV2Theme();
+								ApplyLogWV2Theme();
 							}
 							// 過去のコメントの出力状態をリセット
 							bNicoReceivingPastChat_ = false;
@@ -5923,7 +5308,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					bPostToRefuge_ = !bPostToRefuge_;
 					bPostToRefugeInverted_ = false;
 					InvalidateRect(hwnd, nullptr, FALSE);
-					ApplyWV2Theme();
+					ApplyLogWV2Theme();
 				}
 			} else {
 				// 受信中
@@ -6107,10 +5492,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				if (jkStream_.Send(hwnd, WMS_JK, '+', u8post)) {
 					lastPostTick_ = GetTickCount();
 					GetPostComboBoxText(lastPostComm_, _countof(lastPostComm_));
-					// アンドゥできるように選択削除で消す
-					if (SendDlgItemMessage(hwnd, IDC_CB_POST, CB_SETEDITSEL, 0, MAKELPARAM(0, -1)) == TRUE) {
-						SendDlgItemMessage(hwnd, IDC_CB_POST, WM_CLEAR, 0, 0);
-					}
+					// 入力欄をクリア
+					SendDlgItemMessage(hwnd, IDC_CB_POST, EM_SETSEL, 0, static_cast<LPARAM>(-1));
+					SendDlgItemMessage(hwnd, IDC_CB_POST, WM_CLEAR, 0, 0);
 #ifdef _DEBUG
 					OutputDebugString(TEXT("##POST##"));
 					OutputDebugString(post);
@@ -6134,23 +5518,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		{
 			RECT rcParent, rc;
 			GetClientRect(hwnd, &rcParent);
-			HWND hItem = GetDlgItem(hwnd, IDC_CB_POST);
+			HWND hItem = GetDlgItem(hwnd, IDC_FORCELIST);
 			GetWindowRect(hItem, &rc);
 			MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&rc), 2);
-			int padding = rc.left;
-			if (!cookie_[0]) {
-				// クッキーが設定されていなければ間違いなく投稿不能なので入力ボックスを表示しない
-				SetWindowPos(hItem, nullptr, rc.left, rcParent.bottom, rcParent.right-rc.left*2, rc.bottom-rc.top, SWP_NOZORDER);
-			} else {
-				padding += 6 + static_cast<int>(SendMessage(hItem, CB_GETITEMHEIGHT, static_cast<WPARAM>(-1), 0));
-				SetWindowPos(hItem, nullptr, rc.left, rcParent.bottom-padding, rcParent.right-rc.left*2, rc.bottom-rc.top, SWP_NOZORDER);
-			}
-			hItem = GetDlgItem(hwnd, IDC_FORCELIST);
-			GetWindowRect(hItem, &rc);
-			MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&rc), 2);
-			if (cookie_[0]) {
-				// ボタン類が入力ボックスと被らないようにする
-				int swShow = rcParent.bottom-rc.top-padding < -4 ? SW_HIDE : SW_SHOW;
+			{
+				int swShow = rcParent.bottom-rc.top < 10 ? SW_HIDE : SW_SHOW;
 				if (uMsg == WM_SHOWWINDOW || (GetWindowLong(GetDlgItem(hwnd, IDC_RADIO_FORCE), GWL_STYLE) & WS_VISIBLE ? true : false) != (swShow != SW_HIDE)) {
 					ShowWindow(GetDlgItem(hwnd, IDC_RADIO_FORCE), swShow);
 					ShowWindow(GetDlgItem(hwnd, IDC_RADIO_LOG), swShow);
@@ -6166,7 +5538,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					ShowWindow(GetDlgItem(hwnd, IDC_BUTTON_COMMENT), swShow);
 				}
 			}
-			SetWindowPos(hItem, nullptr, 0, 0, rcParent.right-rc.left*2, rcParent.bottom-rc.top-padding, SWP_NOMOVE | SWP_NOZORDER);
+			SetWindowPos(hItem, nullptr, 0, 0, rcParent.right-rc.left*2, rcParent.bottom-rc.top, SWP_NOMOVE | SWP_NOZORDER);
 			// WebView2 をリストボックスと同じ矩形に配置、表示モードに応じて切り替え
 			if (pLogWV2Controller_) {
 				RECT wv2Bounds; GetWindowRect(hItem, &wv2Bounds);
@@ -6180,22 +5552,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		}
 		break;
 	case WM_CTLCOLOREDIT:
-		// 現在の投稿先によって背景色を変える
-		if (s_.bRefugeMixing && hForcePostEditBox_ && reinterpret_cast<HWND>(lParam) == hForcePostEditBox_) {
-			if (hbrForcePostEditBox_) {
-				DeleteBrush(hbrForcePostEditBox_);
-				hbrForcePostEditBox_ = nullptr;
-			}
-			COLORREF cr = bPostToRefuge_ ? s_.crRefugeEditBox : s_.crNicoEditBox;
-			if (cr != RGB(0xFF, 0xFF, 0xFF)) {
-				HDC hdc = reinterpret_cast<HDC>(wParam);
-				SetTextColor(hdc, GetBrightness(cr) < 255 ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0));
-				SetBkMode(hdc, OPAQUE);
-				SetBkColor(hdc, cr);
-				hbrForcePostEditBox_ = CreateSolidBrush(cr);
-				return reinterpret_cast<LRESULT>(hbrForcePostEditBox_);
-			}
-		}
 		break;
 	}
 	return DefWindowProc(hwnd, uMsg, wParam, lParam);

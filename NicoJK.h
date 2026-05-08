@@ -207,10 +207,6 @@ private:
 	void ShowLocalCommandHelp();
 	void ShowNicoLoginWindow();
 	void ShowCommentWindow();
-	static LRESULT CALLBACK CommentWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-	static LRESULT CALLBACK CommentEditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
-	void OnWV2CommentSend(HWND hwndComment, LPCWSTR text);
-	void ApplyWV2Theme();
 	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
 	void RequestJkcnslLoginSettings();
 	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
@@ -248,7 +244,6 @@ private:
 	HWND hPanel_;
 	HWND hPanelPopup_;
 	HWND hForce_;
-	HWND hForcePostEditBox_;
 	HWND hForceTooltip_;
 	HWND hHelpWindow_;
 	HWND hHelpEdit_;
@@ -258,13 +253,6 @@ private:
 	HWND hLoginOtpEdit_;
 	HWND hLoginStatus_;
 	HWND hLoginLastLogin_;
-	HWND hCommentWindow_;
-	HWND hCommentEdit_;
-	bool commentPopupOpen_   = false;
-	Microsoft::WRL::ComPtr<ICoreWebView2Controller> pWV2Controller_;
-	Microsoft::WRL::ComPtr<ICoreWebView2>           pWV2_;
-	EventRegistrationToken                          wv2MsgToken_ = {};
-	bool                                            wv2Ready_    = false;
 	Microsoft::WRL::ComPtr<ICoreWebView2Controller> pLogWV2Controller_;
 	Microsoft::WRL::ComPtr<ICoreWebView2>           pLogWV2_;
 	EventRegistrationToken                          logWV2MsgToken_ = {};
@@ -275,7 +263,6 @@ private:
 	HANDLE                    hChannelWsQuit_      = nullptr;
 	PVOID volatile            hChannelWsHandle_    = nullptr; // 受信中 hWs (割り込み用)
 	std::atomic<bool>         channelWsConnected_  {false};
-	HBRUSH hbrForcePostEditBox_;
 	HFONT hForceFont_;
 	// DirectWrite / Direct2D (カラー絵文字 for リストボックス)
 	IDWriteFactory2 *pDWriteFactory_;
