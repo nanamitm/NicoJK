@@ -200,7 +200,9 @@ private:
 	void ShowNicoLoginWindow();
 	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
 	void RequestJkcnslLoginSettings();
+	bool SendJkcnslCacheServerUrl(LPCTSTR url);
 	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
+	bool ClearJkcnslLoginSettings();
 	bool SendJkcnslLoginOtp(LPCTSTR otp);
 	bool CancelJkcnslLogin();
 	void ProcessJkcnslLoginRecv();
@@ -244,6 +246,7 @@ private:
 	HWND hLoginOtpEdit_;
 	HWND hLoginStatus_;
 	HWND hLoginLastLogin_;
+	HWND hLoginCacheUrlEdit_;
 	Microsoft::WRL::ComPtr<ICoreWebView2Controller> pLogWV2Controller_;
 	Microsoft::WRL::ComPtr<ICoreWebView2>           pLogWV2_;
 	EventRegistrationToken                          logWV2MsgToken_ = {};
@@ -287,7 +290,7 @@ private:
 	std::string loginMail_;
 	std::string loginPassword_;
 	int loginState_;
-	bool bLoginSettingsQuerying_;
+	int loginSettingsState_;
 	int currentJKToGet_;
 	int currentJK_;
 	int currentJKChatCount_;

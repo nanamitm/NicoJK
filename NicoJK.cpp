@@ -118,12 +118,16 @@ enum {
 	IDC_LOGIN_OTP,
 	IDC_LOGIN_STATUS,
 	IDC_LOGIN_LAST_LOGIN,
+	IDC_LOGIN_CACHE_URL,
 	IDC_LOGIN_BUTTON_START,
 	IDC_LOGIN_BUTTON_OTP,
 	IDC_LOGIN_BUTTON_CANCEL,
+	IDC_LOGIN_BUTTON_CLEAR,
+	IDC_LOGIN_BUTTON_CACHE_SAVE,
 	IDC_LOGIN_LABEL_MAIL,
 	IDC_LOGIN_LABEL_PASSWORD,
 	IDC_LOGIN_LABEL_OTP,
+	IDC_LOGIN_LABEL_CACHE_URL,
 };
 
 enum {
@@ -150,6 +154,14 @@ enum {
 	LOGIN_STATE_SET_PASSWORD,
 	LOGIN_STATE_LOGIN,
 	LOGIN_STATE_WAIT_2FA,
+	LOGIN_STATE_CLEAR_MAIL,
+	LOGIN_STATE_CLEAR_PASSWORD,
+};
+
+enum {
+	LOGIN_SETTINGS_STATE_IDLE,
+	LOGIN_SETTINGS_STATE_QUERY,
+	LOGIN_SETTINGS_STATE_SET_CACHE,
 };
 
 } // anonymous namespace
@@ -258,6 +270,7 @@ CNicoJK::CNicoJK()
 	, hLoginOtpEdit_(nullptr)
 	, hLoginStatus_(nullptr)
 	, hLoginLastLogin_(nullptr)
+	, hLoginCacheUrlEdit_(nullptr)
 	, hForceFont_(nullptr)
 	, bDisplayLogList_(false)
 	, logListDisplayedSize_(0)
@@ -271,7 +284,7 @@ CNicoJK::CNicoJK()
 	, forwardOffset_(0)
 	, forwardOffsetDelta_(0)
 	, loginState_(LOGIN_STATE_IDLE)
-	, bLoginSettingsQuerying_(false)
+	, loginSettingsState_(LOGIN_SETTINGS_STATE_IDLE)
 	, currentJKToGet_(-1)
 	, currentJK_(-1)
 	, currentJKChatCount_(0)
@@ -1682,8 +1695,8 @@ void CNicoJK::ShowNicoLoginWindow()
 		}
 		int x = rc.left ? rc.left + 48 : CW_USEDEFAULT;
 		int y = rc.top ? rc.top + 48 : CW_USEDEFAULT;
-		int w = 420;
-		int h = 220;
+		int w = 520;
+		int h = 260;
 		hLoginWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.login"), TEXT("NicoJK - ニコニコログイン"),
 		                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
 		                               x, y, w, h, hForce_, nullptr, g_hinstDLL, this);
@@ -1716,6 +1729,10 @@ void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 		case LOGIN_STATE_SET_PASSWORD:
 			SetWindowText(hLoginStatus_, TEXT("ログイン情報をjkcnslに送信しています。"));
 			break;
+		case LOGIN_STATE_CLEAR_MAIL:
+		case LOGIN_STATE_CLEAR_PASSWORD:
+			SetWindowText(hLoginStatus_, TEXT("ログイン情報を削除しています。"));
+			break;
 		case LOGIN_STATE_LOGIN:
 			SetWindowText(hLoginStatus_, TEXT("jkcnslでログインしています。"));
 			break;
@@ -1729,6 +1746,7 @@ void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 	}
 	bool bWait2FA = loginState_ == LOGIN_STATE_WAIT_2FA;
 	bool bBusy = loginState_ != LOGIN_STATE_IDLE;
+	bool bSettingsBusy = loginSettingsState_ != LOGIN_SETTINGS_STATE_IDLE;
 	if (hLoginMailEdit_) {
 		EnableWindow(hLoginMailEdit_, !bBusy);
 	}
@@ -1736,6 +1754,8 @@ void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 		EnableWindow(hLoginPasswordEdit_, !bBusy);
 	}
 	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_START), !bBusy);
+	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_CLEAR),
+	             !bBusy && hLoginMailEdit_ && GetWindowTextLength(hLoginMailEdit_) > 0);
 	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_OTP), bWait2FA);
 	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_CANCEL), bBusy);
 	if (hLoginOtpEdit_) {
@@ -1744,6 +1764,10 @@ void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 			SetFocus(hLoginOtpEdit_);
 		}
 	}
+	if (hLoginCacheUrlEdit_) {
+		EnableWindow(hLoginCacheUrlEdit_, !bSettingsBusy);
+	}
+	EnableWindow(GetDlgItem(hLoginWindow_, IDC_LOGIN_BUTTON_CACHE_SAVE), !bSettingsBusy);
 	InvalidateRect(hLoginWindow_, nullptr, TRUE);
 }
 
@@ -1752,18 +1776,22 @@ void CNicoJK::RequestJkcnslLoginSettings()
 	if (!hForce_ || !hLoginMailEdit_) {
 		return;
 	}
-	if (bLoginSettingsQuerying_) {
+	if (loginSettingsState_ != LOGIN_SETTINGS_STATE_IDLE) {
 		loginSettingsStream_.Close();
 		loginSettingsBuf_.clear();
-		bLoginSettingsQuerying_ = false;
+		loginSettingsState_ = LOGIN_SETTINGS_STATE_IDLE;
 	}
 	if (hLoginLastLogin_) {
 		SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 取得中..."));
 	}
+	if (hLoginCacheUrlEdit_) {
+		SetWindowText(hLoginCacheUrlEdit_, TEXT(""));
+	}
 	loginSettingsStream_.Close();
 	loginSettingsBuf_.clear();
 	if (loginSettingsStream_.Send(hForce_, WMS_LOGIN_SETTINGS, 'S', "")) {
-		bLoginSettingsQuerying_ = true;
+		loginSettingsState_ = LOGIN_SETTINGS_STATE_QUERY;
+		UpdateNicoLoginWindowState(TEXT("jkcnsl設定を取得しています。"));
 	}
 }
 
@@ -1787,6 +1815,27 @@ static std::string ToUtf8String(LPCTSTR text)
 static bool HasLineBreak(const std::string &text)
 {
 	return text.find_first_of("\r\n") != std::string::npos;
+}
+
+static bool SetWindowTextUtf8(HWND hwnd, const char *text)
+{
+	if (!hwnd || !text) {
+		return false;
+	}
+#ifdef UNICODE
+	int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+	if (len <= 0) {
+		return false;
+	}
+	std::vector<TCHAR> buf(len);
+	if (MultiByteToWideChar(CP_UTF8, 0, text, -1, buf.data(), len) <= 0) {
+		return false;
+	}
+	SetWindowText(hwnd, buf.data());
+#else
+	SetWindowText(hwnd, text);
+#endif
+	return true;
 }
 
 static bool FormatUnixTimeLocal(const char *text, LPTSTR out, size_t outSize)
@@ -1831,6 +1880,60 @@ bool CNicoJK::StartJkcnslLogin(LPCTSTR mail, LPCTSTR password)
 	if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', command.c_str())) {
 		loginState_ = LOGIN_STATE_IDLE;
 		UpdateNicoLoginWindowState(TEXT("jkcnslへのログイン設定送信に失敗しました。"));
+		return false;
+	}
+	UpdateNicoLoginWindowState();
+	return true;
+}
+
+bool CNicoJK::SendJkcnslCacheServerUrl(LPCTSTR url)
+{
+	if (!hForce_ || !url || loginSettingsState_ != LOGIN_SETTINGS_STATE_IDLE) {
+		return false;
+	}
+	std::string urlUtf8 = ToUtf8String(url);
+	if (HasLineBreak(urlUtf8)) {
+		UpdateNicoLoginWindowState(TEXT("キャッシュサーバーURLが不正です。"));
+		return false;
+	}
+
+	loginSettingsStream_.Close();
+	loginSettingsBuf_.clear();
+	std::string command;
+	if (urlUtf8.empty()) {
+		command = "cache_server_url";
+	} else {
+		command = "cache_server_url " + urlUtf8;
+	}
+	loginSettingsState_ = LOGIN_SETTINGS_STATE_SET_CACHE;
+	if (!loginSettingsStream_.Send(hForce_, WMS_LOGIN_SETTINGS, 'S', command.c_str())) {
+		loginSettingsState_ = LOGIN_SETTINGS_STATE_IDLE;
+		UpdateNicoLoginWindowState(TEXT("キャッシュサーバー設定の送信に失敗しました。"));
+		return false;
+	}
+	UpdateNicoLoginWindowState(urlUtf8.empty() ? TEXT("キャッシュサーバー設定を削除しています。") :
+	                                             TEXT("キャッシュサーバー設定を保存しています。"));
+	return true;
+}
+
+bool CNicoJK::ClearJkcnslLoginSettings()
+{
+	if (!hForce_ || !hLoginMailEdit_) {
+		return false;
+	}
+	if (GetWindowTextLength(hLoginMailEdit_) == 0) {
+		UpdateNicoLoginWindowState(TEXT("削除するログイン情報がありません。"));
+		return false;
+	}
+
+	loginStream_.Close();
+	loginBuf_.clear();
+	loginMail_.clear();
+	loginPassword_.clear();
+	loginState_ = LOGIN_STATE_CLEAR_MAIL;
+	if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', "mail")) {
+		loginState_ = LOGIN_STATE_IDLE;
+		UpdateNicoLoginWindowState(TEXT("jkcnslへのログイン情報削除要求に失敗しました。"));
 		return false;
 	}
 	UpdateNicoLoginWindowState();
@@ -1918,6 +2021,29 @@ void CNicoJK::ProcessJkcnslLoginRecv()
 		} else {
 			UpdateNicoLoginWindowState();
 		}
+	} else if (loginState_ == LOGIN_STATE_CLEAR_MAIL) {
+		loginState_ = LOGIN_STATE_CLEAR_PASSWORD;
+		if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', "password")) {
+			loginState_ = LOGIN_STATE_IDLE;
+			UpdateNicoLoginWindowState(TEXT("jkcnslへのパスワード削除要求に失敗しました。"));
+		} else {
+			UpdateNicoLoginWindowState();
+		}
+	} else if (loginState_ == LOGIN_STATE_CLEAR_PASSWORD) {
+		loginState_ = LOGIN_STATE_IDLE;
+		if (hLoginMailEdit_) {
+			SetWindowText(hLoginMailEdit_, TEXT(""));
+		}
+		if (hLoginPasswordEdit_) {
+			SetWindowText(hLoginPasswordEdit_, TEXT(""));
+		}
+		if (hLoginOtpEdit_) {
+			SetWindowText(hLoginOtpEdit_, TEXT(""));
+		}
+		if (hLoginLastLogin_) {
+			SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 未取得"));
+		}
+		UpdateNicoLoginWindowState(TEXT("ログイン情報を削除しました。次回接続から反映されます。"));
 	} else if (loginState_ == LOGIN_STATE_SET_PASSWORD) {
 		loginPassword_.clear();
 		loginState_ = LOGIN_STATE_LOGIN;
@@ -1953,20 +2079,20 @@ void CNicoJK::ProcessJkcnslLoginSettingsRecv()
 			if (line.compare(0, sizeof(mailPrefix) - 1, mailPrefix) == 0) {
 				const char *mail = line.c_str() + sizeof(mailPrefix) - 1;
 				if (hLoginMailEdit_ && GetWindowTextLength(hLoginMailEdit_) == 0) {
-#ifdef UNICODE
-					TCHAR text[256];
-					int len = MultiByteToWideChar(CP_UTF8, 0, mail, -1, text, _countof(text) - 1);
-					text[max(len, 0)] = TEXT('\0');
-					SetWindowText(hLoginMailEdit_, text);
-#else
-					SetWindowText(hLoginMailEdit_, mail);
-#endif
+					SetWindowTextUtf8(hLoginMailEdit_, mail);
 				}
+			}
+			static const char cacheUrlPrefix[] = "cache_server_url ";
+			if (line.compare(0, sizeof(cacheUrlPrefix) - 1, cacheUrlPrefix) == 0) {
+				SetWindowTextUtf8(hLoginCacheUrlEdit_, line.c_str() + sizeof(cacheUrlPrefix) - 1);
 			}
 			static const char lastLoginPrefix[] = "last_login_attempt ";
 			if (line.compare(0, sizeof(lastLoginPrefix) - 1, lastLoginPrefix) == 0 && hLoginLastLogin_) {
+				const char *lastLogin = line.c_str() + sizeof(lastLoginPrefix) - 1;
 				TCHAR text[64];
-				if (FormatUnixTimeLocal(line.c_str() + sizeof(lastLoginPrefix) - 1, text, _countof(text))) {
+				if (strcmp(lastLogin, "0") == 0) {
+					SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 未取得"));
+				} else if (FormatUnixTimeLocal(lastLogin, text, _countof(text))) {
 					SetWindowText(hLoginLastLogin_, text);
 				} else {
 					SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 不明"));
@@ -1980,7 +2106,14 @@ void CNicoJK::ProcessJkcnslLoginSettingsRecv()
 		loginSettingsBuf_.clear();
 	}
 	if (ret < 0) {
-		bLoginSettingsQuerying_ = false;
+		int state = loginSettingsState_;
+		loginSettingsState_ = LOGIN_SETTINGS_STATE_IDLE;
+		if (state == LOGIN_SETTINGS_STATE_SET_CACHE) {
+			UpdateNicoLoginWindowState(ret == -2 ? TEXT("キャッシュサーバー設定を保存しました。次回接続から反映されます。") :
+			                                      TEXT("キャッシュサーバー設定の保存に失敗しました。"));
+		} else if (state == LOGIN_SETTINGS_STATE_QUERY) {
+			UpdateNicoLoginWindowState();
+		}
 	}
 }
 
@@ -2582,11 +2715,17 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			                                       WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
 			                                       0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_OTP), g_hinstDLL, nullptr);
 			pThis->hLoginStatus_ = CreateWindowEx(0, TEXT("STATIC"), nullptr,
-			                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
+			                                      WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
 			                                      0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_STATUS), g_hinstDLL, nullptr);
 			pThis->hLoginLastLogin_ = CreateWindowEx(0, TEXT("STATIC"), TEXT("最終ログイン: 未取得"),
 			                                         WS_CHILD | WS_VISIBLE | SS_LEFT,
 			                                         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LAST_LOGIN), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("STATIC"), TEXT("キャッシュサーバー"),
+			               WS_CHILD | WS_VISIBLE | SS_LEFT,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LABEL_CACHE_URL), g_hinstDLL, nullptr);
+			pThis->hLoginCacheUrlEdit_ = CreateWindowEx(0, TEXT("EDIT"), nullptr,
+			                                            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+			                                            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_CACHE_URL), g_hinstDLL, nullptr);
 			CreateWindowEx(0, TEXT("BUTTON"), TEXT("ログイン"),
 			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_START), g_hinstDLL, nullptr);
@@ -2596,15 +2735,29 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			CreateWindowEx(0, TEXT("BUTTON"), TEXT("キャンセル"),
 			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_CANCEL), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("BUTTON"), TEXT("情報削除"),
+			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_CLEAR), g_hinstDLL, nullptr);
+			CreateWindowEx(0, TEXT("BUTTON"), TEXT("保存"),
+			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_CACHE_SAVE), g_hinstDLL, nullptr);
 
 			HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-			for (int id = IDC_LOGIN_MAIL; id <= IDC_LOGIN_LABEL_OTP; ++id) {
+			int itemIds[] = {
+				IDC_LOGIN_MAIL, IDC_LOGIN_PASSWORD, IDC_LOGIN_OTP, IDC_LOGIN_STATUS, IDC_LOGIN_LAST_LOGIN,
+				IDC_LOGIN_CACHE_URL, IDC_LOGIN_LABEL_MAIL, IDC_LOGIN_LABEL_PASSWORD, IDC_LOGIN_LABEL_OTP,
+				IDC_LOGIN_LABEL_CACHE_URL
+			};
+			for (int id : itemIds) {
 				HWND hItem = GetDlgItem(hwnd, id);
 				if (hItem) {
 					SendMessage(hItem, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 				}
 			}
-			int buttonIds[] = {IDC_LOGIN_BUTTON_START, IDC_LOGIN_BUTTON_OTP, IDC_LOGIN_BUTTON_CANCEL};
+			int buttonIds[] = {
+				IDC_LOGIN_BUTTON_START, IDC_LOGIN_BUTTON_OTP, IDC_LOGIN_BUTTON_CANCEL,
+				IDC_LOGIN_BUTTON_CLEAR, IDC_LOGIN_BUTTON_CACHE_SAVE
+			};
 			for (int id : buttonIds) {
 				HWND hButton = GetDlgItem(hwnd, id);
 				if (hButton) {
@@ -2631,6 +2784,10 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 		int buttonW = 84 * dpi / 96;
 		int buttonH = 26 * dpi / 96;
 		int otpButtonW = 56 * dpi / 96;
+		int cancelButtonW = 84 * dpi / 96;
+		int clearButtonW = 84 * dpi / 96;
+		int cacheButtonW = 56 * dpi / 96;
+		int statusH = 24 * dpi / 96;
 		int y = margin;
 		int editX = margin + labelW;
 		int editW = max<int>(80, static_cast<int>(rc.right) - editX - margin);
@@ -2639,16 +2796,22 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_START), rc.right - margin - buttonW, y - 2 * dpi / 96, buttonW, buttonH, TRUE);
 		y += editH + gap;
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_PASSWORD), margin, y + 3 * dpi / 96, labelW, editH, TRUE);
-		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_PASSWORD), editX, y, editW, editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_PASSWORD), editX, y, max(40, editW - clearButtonW - gap), editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_CLEAR), rc.right - margin - clearButtonW, y - 2 * dpi / 96, clearButtonW, buttonH, TRUE);
 		y += editH + gap;
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_OTP), margin, y + 3 * dpi / 96, labelW, editH, TRUE);
-		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_OTP), editX, y, max(40, editW - otpButtonW * 2 - gap * 2), editH, TRUE);
-		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_OTP), rc.right - margin - otpButtonW * 2 - gap, y - 2 * dpi / 96, otpButtonW, buttonH, TRUE);
-		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_CANCEL), rc.right - margin - otpButtonW, y - 2 * dpi / 96, otpButtonW, buttonH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_OTP), editX, y, max(40, editW - otpButtonW - cancelButtonW - gap * 2), editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_OTP), rc.right - margin - otpButtonW - cancelButtonW - gap, y - 2 * dpi / 96, otpButtonW, buttonH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_CANCEL), rc.right - margin - cancelButtonW, y - 2 * dpi / 96, cancelButtonW, buttonH, TRUE);
 		y += editH + gap;
-		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_STATUS), margin, y, rc.right - margin * 2, editH, TRUE);
-		y += editH + gap + gap;
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LAST_LOGIN), margin, y, rc.right - margin * 2, editH, TRUE);
+		y += editH + gap;
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_CACHE_URL), margin, y + 3 * dpi / 96, labelW, editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_CACHE_URL), editX, y, max(40, editW - cacheButtonW - gap), editH, TRUE);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_CACHE_SAVE), rc.right - margin - cacheButtonW, y - 2 * dpi / 96, cacheButtonW, buttonH, TRUE);
+		int statusY = max<int>(y + editH + gap, static_cast<int>(rc.bottom) - margin - statusH);
+		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_STATUS), margin, statusY,
+		           static_cast<int>(rc.right) - margin * 2, statusH, TRUE);
 	};
 
 	switch (uMsg) {
@@ -2669,6 +2832,10 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 	case WM_COMMAND:
 		if (!pThis) {
 			break;
+		}
+		if (LOWORD(wParam) == IDC_LOGIN_MAIL && HIWORD(wParam) == EN_CHANGE) {
+			pThis->UpdateNicoLoginWindowState();
+			return 0;
 		}
 		switch (LOWORD(wParam)) {
 		case IDC_LOGIN_BUTTON_START:
@@ -2694,6 +2861,16 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			return 0;
 		case IDC_LOGIN_BUTTON_CANCEL:
 			pThis->CancelJkcnslLogin();
+			return 0;
+		case IDC_LOGIN_BUTTON_CLEAR:
+			pThis->ClearJkcnslLoginSettings();
+			return 0;
+		case IDC_LOGIN_BUTTON_CACHE_SAVE:
+			{
+				TCHAR url[1024];
+				GetWindowText(pThis->hLoginCacheUrlEdit_, url, _countof(url));
+				pThis->SendJkcnslCacheServerUrl(url);
+			}
 			return 0;
 		}
 		break;
@@ -2776,6 +2953,7 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			pThis->hLoginOtpEdit_ = nullptr;
 			pThis->hLoginStatus_ = nullptr;
 			pThis->hLoginLastLogin_ = nullptr;
+			pThis->hLoginCacheUrlEdit_ = nullptr;
 		}
 		break;
 	}
@@ -2878,9 +3056,13 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .ff{flex-shrink:0;min-width:5.5em;font-variant-numeric:tabular-nums;margin-right:.3em;font-size:.9em}
 .fn{flex-shrink:0;margin-right:.3em}
 .fe{flex:1;color:#9acd32;overflow:hidden;min-width:0;font-size:.9em;font-variant-emoji:text}
-#pp{position:absolute;bottom:34px;left:0;right:0;height:28px;display:flex;align-items:center;gap:3px;padding:0 5px;background:var(--bg);border-top:1px solid rgba(128,128,128,.3);visibility:hidden;z-index:10}
-.cc{width:16px;height:16px;border-radius:50%;cursor:pointer;flex-shrink:0;border:2px solid transparent}
-.cc.on{box-shadow:0 0 0 2px var(--fg,#000)}
+#pp{position:absolute;bottom:34px;left:0;right:0;display:flex;gap:8px;padding:6px;background:var(--bg);border-top:1px solid rgba(128,128,128,.3);box-shadow:0 -2px 8px rgba(0,0,0,.08);visibility:hidden;z-index:10}
+#po{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.pg{display:flex;align-items:center;gap:4px;min-height:20px}
+.pl{width:3.2em;flex-shrink:0;opacity:.7;font-size:9pt;text-align:right;margin-right:2px}
+.cg{display:grid;grid-template-columns:repeat(5,22px);gap:3px}
+.cc{width:22px;height:18px;border-radius:3px;cursor:pointer;flex-shrink:0;border:1px solid rgba(128,128,128,.65);display:flex;align-items:center;justify-content:center;font-size:10pt;line-height:1;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.65)}
+.cc.on::after{content:'✓'}
 .c0{background:#fff;border-color:#aaa}
 .c1{background:#e00}
 .c2{background:#f7a}
@@ -2891,10 +3073,20 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .c7{background:#00e}
 .c8{background:#808}
 .c9{background:#222}
+.c0{color:#111;text-shadow:none}
 .sp{width:1px;height:14px;background:var(--fg,#000);opacity:.25;flex-shrink:0}
 .tb{flex-shrink:0;padding:0 4px;height:16px;line-height:16px;border:1px solid var(--fg,#000);border-radius:3px;cursor:pointer;background:transparent;color:var(--fg,#000);font-size:9pt;opacity:.6}
 .tb.on{background:var(--fg,#000);color:var(--bg,#fff);opacity:1}
+.db{margin-left:auto;flex-shrink:0;padding:0 6px;height:18px;border:1px solid rgba(128,128,128,.7);border-radius:3px;cursor:pointer;background:transparent;color:inherit;font-size:9pt;opacity:.75}
+.db:hover{opacity:1;background:rgba(128,128,128,.12)}
+#pv{width:112px;min-height:70px;flex-shrink:0;border:1px solid rgba(128,128,128,.55);border-radius:4px;position:relative;background:linear-gradient(to bottom,rgba(128,128,128,.08),rgba(128,128,128,.02));overflow:hidden}
+#pv::before{content:'';position:absolute;left:10px;right:10px;top:50%;border-top:1px dashed rgba(128,128,128,.35)}
+#pt{position:absolute;left:50%;transform:translateX(-50%);white-space:nowrap;max-width:96px;overflow:hidden;text-overflow:ellipsis;font-weight:bold;text-shadow:0 1px 2px rgba(0,0,0,.28);font-size:12pt;color:var(--fg)}
+#pt.ue{top:8px}#pt.naka{top:50%;transform:translate(-50%,-50%)}#pt.shita{bottom:8px}
+#pt.big{font-size:15pt}#pt.small{font-size:9pt}
 #mn{flex-shrink:0;height:34px;display:flex;align-items:center;padding:3px 5px;gap:4px;border-top:1px solid rgba(128,128,128,.15)}
+body.noinput #mn{display:none}
+body.noinput #pp{bottom:0}
 #cb{flex-shrink:0;width:26px;height:27px;border:1px solid rgba(128,128,128,.6);border-radius:4px;cursor:pointer;background:transparent;color:inherit;font-size:13pt;line-height:1;font-family:inherit;display:flex;align-items:center;justify-content:center}
 #cb.open{background:rgba(128,128,128,.15)}
 #c{flex:1;height:27px;border:1px solid rgba(128,128,128,.5);border-radius:3px;padding:1px 5px;background:transparent;color:inherit;outline:none;font-family:inherit;font-size:inherit}
@@ -2903,32 +3095,28 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 <div id="L"></div><div id="F"></div>
 </div>
 <div id="pp">
-<div class="cc c0 on" data-c="" title="白"></div>
-<div class="cc c1" data-c="red" title="赤"></div>
-<div class="cc c2" data-c="pink" title="ピンク"></div>
-<div class="cc c3" data-c="orange" title="橙"></div>
-<div class="cc c4" data-c="yellow" title="黄"></div>
-<div class="cc c5" data-c="green" title="緑"></div>
-<div class="cc c6" data-c="cyan" title="水色"></div>
-<div class="cc c7" data-c="blue" title="青"></div>
-<div class="cc c8" data-c="purple" title="紫"></div>
-<div class="cc c9" data-c="black" title="黒"></div>
-<div class="sp"></div>
-<button class="tb on" data-p="">流</button>
-<button class="tb" data-p="ue">上</button>
-<button class="tb" data-p="shita">下</button>
-<div class="sp"></div>
-<button class="tb" data-s="big">大</button>
-<button class="tb on" data-s="">普</button>
-<button class="tb" data-s="small">小</button>
+<div id="po">
+<div class="pg"><span class="pl">色</span>
+<div class="cg"><div class="cc c0 on" data-c="" title="白"></div><div class="cc c1" data-c="red" title="赤"></div><div class="cc c2" data-c="pink" title="ピンク"></div><div class="cc c3" data-c="orange" title="橙"></div><div class="cc c4" data-c="yellow" title="黄"></div><div class="cc c5" data-c="green" title="緑"></div><div class="cc c6" data-c="cyan" title="水色"></div><div class="cc c7" data-c="blue" title="青"></div><div class="cc c8" data-c="purple" title="紫"></div><div class="cc c9" data-c="black" title="黒"></div></div>
+</div>
+<div class="pg"><span class="pl">位置</span>
+<button class="tb on" data-p="">流れる</button><button class="tb" data-p="ue">上</button><button class="tb" data-p="shita">下</button>
+</div>
+<div class="pg"><span class="pl">サイズ</span>
+<button class="tb" data-s="big">大</button><button class="tb on" data-s="">普通</button><button class="tb" data-s="small">小</button>
+<button id="db" class="db" title="白・流れる・普通に戻す">リセット</button>
+</div>
+</div>
+<div id="pv"><div id="pt" class="naka">コメント</div></div>
 </div>
 <div id="mn">
 <button id="cb" title="コマンド選択">▷</button>
 <input id="c" type="text" maxlength="75">
 </div>
+)" LR"(
 <script>
 const L=document.getElementById('L'),F=document.getElementById('F');
-const la=document.getElementById('la'),pp=document.getElementById('pp');
+const la=document.getElementById('la'),pp=document.getElementById('pp'),pt=document.getElementById('pt'),db=document.getElementById('db');
 const cb=document.getElementById('cb'),c=document.getElementById('c');
 let bot=true,sel=null,fsel=null,sc='',sp='',ss='',po=false;
 const TR={'':{'':'▷','big':'▶','small':'▹'},'ue':{'':'△','big':'▲','small':'▵'},'shita':{'':'▽','big':'▼','small':'▿'}};
@@ -2971,6 +3159,8 @@ function upd(){
   const col=CL[sc];
   cb.style.color=col||'';
   cb.style.borderColor=col?col+'99':'';
+  pt.style.color=col||'var(--fg)';
+  pt.className=(sp||'naka')+(ss?' '+ss:'');
 }
 function tog(){
   po=!po;
@@ -2990,6 +3180,7 @@ const pbs=[...document.querySelectorAll('[data-p]')];
 pbs.forEach(b=>b.addEventListener('click',()=>{sp=b.dataset.p;pbs.forEach(x=>x.classList.toggle('on',x.dataset.p===sp));upd();}));
 const sbs=[...document.querySelectorAll('[data-s]')];
 sbs.forEach(b=>b.addEventListener('click',()=>{ss=b.dataset.s;sbs.forEach(x=>x.classList.toggle('on',x.dataset.s===ss));upd();}));
+db.addEventListener('click',()=>{sc='';sp='';ss='';cbs.forEach(x=>x.classList.toggle('on',x.dataset.c===sc));pbs.forEach(x=>x.classList.toggle('on',x.dataset.p===sp));sbs.forEach(x=>x.classList.toggle('on',x.dataset.s===ss));upd();});
 c.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&!e.isComposing){
     if(c.value){
@@ -3047,6 +3238,9 @@ window.chrome.webview.addEventListener('message',e=>{
   }else if(msg.cmd==='input_color'){
     c.style.background=msg.bg||'';
     c.style.color=msg.fg||'';
+  }else if(msg.cmd==='input_visible'){
+    document.body.classList.toggle('noinput', !msg.show);
+    if(!msg.show&&po){po=false;cb.classList.remove('open');pp.style.visibility='hidden';}
   }else if(msg.cmd==='thm'){
     document.documentElement.style.setProperty('--bg',msg.bg);
     document.documentElement.style.setProperty('--fg',msg.fg);
@@ -3136,6 +3330,9 @@ void CNicoJK::ApplyLogWV2Theme()
 	swprintf_s(fnt, L"{\"cmd\":\"fnt\",\"nm\":\"%s\",\"sz\":%d}",
 	    LogJsonEsc(s_.forceFontName).c_str(), s_.forceFontSize);
 	pLogWV2_->PostWebMessageAsString(fnt);
+	pLogWV2_->PostWebMessageAsString(currentJK_ >= 0 ?
+		L"{\"cmd\":\"input_visible\",\"show\":true}" :
+		L"{\"cmd\":\"input_visible\",\"show\":false}");
 	// 投稿先に応じて入力欄の色を設定（bRefugeMixing 時のみ）
 	if (s_.bRefugeMixing) {
 		COLORREF cr = bPostToRefuge_ ? s_.crRefugeEditBox : s_.crNicoEditBox;
@@ -3488,9 +3685,9 @@ bool CNicoJK::CreateForceWindowItems(HWND hwnd)
 		addToolTip(IDC_RADIO_LOG, TEXT("コメントログを表示"));
 		addToolTip(IDC_CHECK_SPECFILE, TEXT("実況ログファイルを読み込む"));
 		addToolTip(IDC_CHECK_RELATIVE, TEXT("読み込むログを現在の再生位置に合わせる"));
-		addToolTip(IDC_BUTTON_OPACITY_TOGGLE, TEXT("透明度を切り替える"));
+		addToolTip(IDC_BUTTON_OPACITY_TOGGLE, TEXT("透明度on/off"));
 		addToolTip(IDC_BUTTON_POPUP, TEXT("ポップアップ表示を切り替える"));
-		addToolTip(IDC_BUTTON_LOGIN, TEXT("ニコニコログイン"));
+		addToolTip(IDC_BUTTON_LOGIN, TEXT("ログイン設定"));
 		addToolTip(IDC_BUTTON_HELP, TEXT("ローカルコマンドヘルプ"));
 		return true;
 	}
@@ -3567,7 +3764,12 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 	}
 	if (hLoginWindow_) {
 		SetWindowTheme(hLoginWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
-		for (int id = IDC_LOGIN_MAIL; id <= IDC_LOGIN_LABEL_OTP; ++id) {
+		int loginItemIds[] = {
+			IDC_LOGIN_MAIL, IDC_LOGIN_PASSWORD, IDC_LOGIN_OTP, IDC_LOGIN_STATUS, IDC_LOGIN_LAST_LOGIN,
+			IDC_LOGIN_CACHE_URL, IDC_LOGIN_LABEL_MAIL, IDC_LOGIN_LABEL_PASSWORD, IDC_LOGIN_LABEL_OTP,
+			IDC_LOGIN_LABEL_CACHE_URL
+		};
+		for (int id : loginItemIds) {
 			HWND hItem = GetDlgItem(hLoginWindow_, id);
 			if (hItem) {
 				::SetWindowTheme(hItem, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
@@ -3936,6 +4138,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				hLoginOtpEdit_ = nullptr;
 				hLoginStatus_ = nullptr;
 				hLoginLastLogin_ = nullptr;
+				hLoginCacheUrlEdit_ = nullptr;
 			}
 			// 位置を保存
 			if (!hPanel_ || hPanelPopup_) {
@@ -4119,6 +4322,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							currentJKChatCount_ = 0;
 							currentJKForceByChatCount_ = -1;
 							currentJKForceByChatCountTick_ = GetTickCount();
+							ApplyLogWV2Theme();
 							TCHAR text[64];
 							_stprintf_s(text, TEXT("%s%sに接続開始しました。"), bMix ? TEXT("ニコニコ実況と") : TEXT(""),
 							            s_.refugeUri.find("nx-jikkyo") != std::string::npos ? TEXT("NX-Jikkyo") : TEXT("避難所"));
@@ -4149,6 +4353,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							currentJKChatCount_ = 0;
 							currentJKForceByChatCount_ = -1;
 							currentJKForceByChatCountTick_ = GetTickCount();
+							ApplyLogWV2Theme();
 							OutputMessageLog(TEXT("ニコニコ実況に接続開始しました。"));
 
 							if (bPostToRefugeInverted_) {
@@ -4544,6 +4749,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				OutputMessageLog(TEXT("コメントサーバとの接続を終了しました。"));
 				WriteToLogfile(-1);
 				currentJK_ = -1;
+				ApplyLogWV2Theme();
 				if (bPostToRefugeInverted_) {
 					// 一時的な投稿先を戻す
 					bPostToRefuge_ = !bPostToRefuge_;
