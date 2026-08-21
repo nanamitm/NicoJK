@@ -37,23 +37,8 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
 
-      # webview2sdk/{x86,x64}/WebView2LoaderStatic.lib は各10MBあり、.gitignoreの
-      # ホワイトリストにも入っていないためリポジトリには含まれていない。
-      # 公式のNuGetパッケージから取得して同じ場所に配置する
-      # (ヘッダーはwebview2sdk/include以下にリポジトリ同梱のものを使う)。
-      - name: Fetch WebView2 loader
-        shell: pwsh
-        env:
-          WEBVIEW2_VERSION: '1.0.3405.78'
-        run: |
-          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$env:WEBVIEW2_VERSION/microsoft.web.webview2.$env:WEBVIEW2_VERSION.nupkg"
-          Invoke-WebRequest -Uri $url -OutFile webview2.zip
-          Expand-Archive -Path webview2.zip -DestinationPath webview2pkg
-          New-Item -ItemType Directory -Force -Path 'webview2sdk/x86', 'webview2sdk/x64' | Out-Null
-          Copy-Item 'webview2pkg/build/native/x86/WebView2LoaderStatic.lib' 'webview2sdk/x86/'
-          Copy-Item 'webview2pkg/build/native/x64/WebView2LoaderStatic.lib' 'webview2sdk/x64/'
-
-      # zlibはソースをリポジトリに同梱しているのでNuGetもvcpkgも不要
+      # NuGetもvcpkgも不要 (WebView2のヘッダーと静的ローダー、zlibのソースは
+      # いずれもリポジトリに同梱している)
       - name: Build
         shell: pwsh
         run: |

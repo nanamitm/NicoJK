@@ -12,6 +12,9 @@
 !*.vcxproj
 !*.vcxproj.filters
 !*.yml
+# WebView2の静的ローダー(ビルド出力の*.libは追跡しないのでパスを限定する)
+!webview2sdk/x86/*.lib
+!webview2sdk/x64/*.lib
 !.gitignore
 !Makefile
 !README
