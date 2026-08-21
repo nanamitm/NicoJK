@@ -1,8 +1,12 @@
-﻿#include "stdafx.h"
+﻿#include "Common.h"
 #include "JKTransfer.h"
+#include <algorithm>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#endif
 
 CJKTransfer::CJKTransfer()
-	: bWorkerCreated_(false)
 {
 }
 
@@ -13,58 +17,58 @@ CJKTransfer::~CJKTransfer()
 
 void CJKTransfer::BeginClose()
 {
-	if (bWorkerCreated_) {
+	if (workerThread_.joinable()) {
 		{
 			lock_recursive_mutex lock(workerLock_);
-			bStopWroker_ = true;
+			bStopWorker_ = true;
 		}
-		SetEvent(hWorkerEvent_);
+		workerEvent_.Set();
 	}
 }
 
 void CJKTransfer::Close()
 {
-	if (bWorkerCreated_) {
+	if (workerThread_.joinable()) {
 		BeginClose();
+#ifdef _WIN32
 		HANDLE hWorkerThread = workerThread_.native_handle();
 		if (WaitForSingleObject(hWorkerThread, 10000) == WAIT_TIMEOUT) {
 			workerThread_.detach();
 			TerminateThread(hWorkerThread, 1);
 			CloseHandle(hWorkerThread);
-		} else {
+		} else
+#endif
+		{
 			workerThread_.join();
 		}
-		CloseHandle(hWorkerEvent_);
-		bWorkerCreated_ = false;
 	}
 }
 
-bool CJKTransfer::CreateWorker(HWND hwnd, UINT msg, bool bEnablePost, DWORD processID)
+bool CJKTransfer::CreateWorker(bool bEnablePost, int processID)
 {
-	if (bWorkerCreated_) {
+	if (workerThread_.joinable()) {
 		return true;
 	}
-	hWorkerEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-	if (hWorkerEvent_) {
-		workerThread_ = std::thread([this, hwnd, msg, bEnablePost, processID]() { WorkerThread(hwnd, msg, bEnablePost, processID); });
-		// 初期化を待つ
-		WaitForSingleObject(hWorkerEvent_, INFINITE);
-		if (bWorkerCreated_) {
-			lock_recursive_mutex lock(workerLock_);
-			bContinueWorker_ = true;
-			return true;
-		}
-		workerThread_.join();
-		CloseHandle(hWorkerEvent_);
+	bContinueWorker_ = true;
+	workerEvent_.Reset();
+	workerThread_ = std::thread([this, bEnablePost, processID]() { WorkerThread(bEnablePost, processID); });
+	// 初期化を待つ
+	workerEvent_.WaitOne();
+	if (!bContinueWorker_) {
+		lock_recursive_mutex lock(workerLock_);
+		bContinueWorker_ = true;
+		return true;
 	}
+	workerThread_.join();
 	return false;
 }
 
-void CJKTransfer::WorkerThread(HWND hwnd, UINT msg, bool bEnablePost, DWORD processID)
+void CJKTransfer::WorkerThread(bool bEnablePost, int processID)
 {
+#ifdef _WIN32
 	HANDLE hChatPipe = INVALID_HANDLE_VALUE;
 	HANDLE hPostPipe = INVALID_HANDLE_VALUE;
-	HANDLE olEvents[] = {hWorkerEvent_, CreateEvent(nullptr, TRUE, TRUE, nullptr), CreateEvent(nullptr, TRUE, TRUE, nullptr)};
+	HANDLE olEvents[] = {workerEvent_.Handle(), CreateEvent(nullptr, TRUE, TRUE, nullptr), CreateEvent(nullptr, TRUE, TRUE, nullptr)};
 	if (olEvents[1] && olEvents[2]) {
 		TCHAR pipeName[64];
 		_stprintf_s(pipeName, TEXT("\\\\.\\pipe\\chat_d7b64ac2_%d"), processID);
@@ -76,17 +80,49 @@ void CJKTransfer::WorkerThread(HWND hwnd, UINT msg, bool bEnablePost, DWORD proc
 	}
 	if (hChatPipe == INVALID_HANDLE_VALUE || (bEnablePost && hPostPipe == INVALID_HANDLE_VALUE)) {
 		// 親スレッドに初期化失敗を通知
-		SetEvent(hWorkerEvent_);
+		workerEvent_.Set();
 		if (hPostPipe != INVALID_HANDLE_VALUE) CloseHandle(hPostPipe);
 		if (hChatPipe != INVALID_HANDLE_VALUE) CloseHandle(hChatPipe);
 		if (olEvents[2]) CloseHandle(olEvents[2]);
 		if (olEvents[1]) CloseHandle(olEvents[1]);
 		return;
 	}
-	bWorkerCreated_ = true;
+#else
+	char chatPipeName[sizeof(JKTASK_BASE_DIR) + 32];
+	char chatClosingName[sizeof(JKTASK_BASE_DIR) + 32];
+	char postPipeName[sizeof(JKTASK_BASE_DIR) + 32];
+	sprintf(chatPipeName, "%s/chat_%d.fifo", JKTASK_BASE_DIR, processID);
+	sprintf(chatClosingName, "%s/chat_%d.fif_", JKTASK_BASE_DIR, processID);
+	sprintf(postPipeName, "%s/post_%d.fifo", JKTASK_BASE_DIR, processID);
+	int postPipe = -1;
+	if (bEnablePost) {
+		if (mkfifo(postPipeName, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) == 0 || errno == EEXIST) {
+			// read()が速やかにEOFを返すことで待機できなくなるのを避けるためO_RDWR
+			postPipe = open(postPipeName, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+			if (postPipe < 0) {
+				unlink(postPipeName);
+			}
+		}
+		if (postPipe < 0) {
+			// 親スレッドに初期化失敗を通知
+			workerEvent_.Set();
+			return;
+		}
+	}
+	if (mkfifo(chatPipeName, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) != 0 && errno != EEXIST) {
+		if (postPipe >= 0) {
+			unlink(postPipeName);
+			close(postPipe);
+		}
+		// 親スレッドに初期化失敗を通知
+		workerEvent_.Set();
+		return;
+	}
+#endif
+
 	bContinueWorker_ = false;
-	bStopWroker_ = false;
-	SetEvent(hWorkerEvent_);
+	bStopWorker_ = false;
+	workerEvent_.Set();
 	// 親スレッドからの続行許可を待つ
 	for (;;) {
 		Sleep(0);
@@ -96,6 +132,7 @@ void CJKTransfer::WorkerThread(HWND hwnd, UINT msg, bool bEnablePost, DWORD proc
 		}
 	}
 
+#ifdef _WIN32
 	OVERLAPPED olChat = {};
 	OVERLAPPED olPost = {};
 	bool bConnectChat = false;
@@ -161,7 +198,7 @@ void CJKTransfer::WorkerThread(HWND hwnd, UINT msg, bool bEnablePost, DWORD proc
 								olPostBuf.push_back('\0');
 								postStr_ = olPostBuf.data();
 								// ウィンドウに通知
-								PostMessage(hwnd, msg, 0, 0);
+								PostMessage(hwndRecvPost_, recvPostMsg_, 0, 0);
 							}
 						}
 					}
@@ -202,7 +239,7 @@ void CJKTransfer::WorkerThread(HWND hwnd, UINT msg, bool bEnablePost, DWORD proc
 		int jkID;
 		{
 			lock_recursive_mutex lock(workerLock_);
-			if (bStopWroker_) {
+			if (bStopWorker_) {
 				break;
 			}
 			if (tick - waitTick >= (chatBuf_.empty() ? WRITE_PENDING_MAX : WRITE_PENDING_MIN)) {
@@ -258,26 +295,143 @@ void CJKTransfer::WorkerThread(HWND hwnd, UINT msg, bool bEnablePost, DWORD proc
 	CloseHandle(hChatPipe);
 	CloseHandle(olEvents[2]);
 	CloseHandle(olEvents[1]);
+#else
+	int chatPipe = -1;
+	std::vector<char> olChatBuf;
+	std::vector<char> olPostBuf;
+	auto waitTick = std::chrono::steady_clock::now();
+	for (;;) {
+		if (chatPipe < 0) {
+			chatPipe = open(chatPipeName, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+		}
+		if (chatPipe >= 0 && !olChatBuf.empty()) {
+			ssize_t n = write(chatPipe, olChatBuf.data(), olChatBuf.size());
+			if (n == 0 || (n < 0 && errno != EAGAIN)) {
+				// 切断
+				close(chatPipe);
+				chatPipe = -1;
+				olChatBuf.clear();
+			} else if (n > 0) {
+				olChatBuf.erase(olChatBuf.begin(), olChatBuf.begin() + n);
+			}
+		}
+		if (postPipe >= 0) {
+			olPostBuf.resize(olPostBuf.size() + POST_BUFFER_SIZE);
+			ssize_t n = read(postPipe, olPostBuf.data() + olPostBuf.size() - POST_BUFFER_SIZE, POST_BUFFER_SIZE);
+			if (n == 0 || (n < 0 && errno != EAGAIN)) {
+				// 終了または失敗。原則ここは踏まない
+				break;
+			}
+			if (n > 0) {
+				olPostBuf.resize(olPostBuf.size() - POST_BUFFER_SIZE + n);
+				for (;;) {
+					auto it = std::find(olPostBuf.begin(), olPostBuf.end(), '\n');
+					if (it == olPostBuf.end()) {
+						break;
+					}
+					*(it - (it != olPostBuf.begin() && *(it - 1) == '\r')) = '\0';
+					if (olPostBuf[0]) {
+						lock_recursive_mutex lock(workerLock_);
+						postStr_ = olPostBuf.data();
+						// 通知
+						recvPostEvent_->Set();
+					}
+					olPostBuf.erase(olPostBuf.begin(), it + 1);
+				}
+			} else {
+				olPostBuf.resize(olPostBuf.size() - POST_BUFFER_SIZE);
+			}
+		}
+
+		// 待機
+		pollfd pfds[3];
+		pfds[0].fd = postPipe;
+		pfds[0].events = POLLIN;
+		pfds[1].fd = workerEvent_.Handle();
+		pfds[1].events = POLLIN;
+		pfds[2].fd = chatPipe;
+		pfds[2].events = POLLOUT;
+		if (poll(pfds + (postPipe < 0), 3 - (postPipe < 0) - (chatPipe < 0 || olChatBuf.empty()), WRITE_PENDING_MIN) < 0 && errno != EINTR) {
+			// 失敗
+			break;
+		}
+		workerEvent_.Reset();
+
+		auto tick = std::chrono::steady_clock::now();
+		{
+			lock_recursive_mutex lock(workerLock_);
+			if (bStopWorker_) {
+				break;
+			}
+			if (std::chrono::duration_cast<std::chrono::milliseconds>(tick - waitTick).count() >= static_cast<int>(chatBuf_.empty() ? WRITE_PENDING_MAX : WRITE_PENDING_MIN)) {
+				if (chatPipe < 0) {
+					chatBuf_.clear();
+				} else if (olChatBuf.empty()) {
+					// 80文字のヘッダをつける
+					olChatBuf.assign(76, ' ');
+					olChatBuf.push_back('-');
+					olChatBuf.push_back('-');
+					olChatBuf.push_back('>');
+					olChatBuf.push_back('\n');
+					olChatBuf.insert(olChatBuf.end(), chatBuf_.begin(), chatBuf_.end());
+					int n = static_cast<int>(std::count(olChatBuf.begin(), olChatBuf.end(), '\n')) - 1;
+					int i = sprintf(olChatBuf.data(), "<!-- J=%d;L=%d;N=%d", currentJKID_, static_cast<int>(olChatBuf.size()) - 80, n);
+					olChatBuf[i] = ' ';
+					chatBuf_.clear();
+				}
+				waitTick = tick;
+			}
+		}
+	}
+
+	if (postPipe >= 0) {
+		unlink(postPipeName);
+		close(postPipe);
+	}
+	if (chatPipe < 0) {
+		// 確実に切断させるため拡張子の末尾を"_"にリネームして接続できないようにしてから開いてみる
+		if( rename(chatPipeName, chatClosingName) == 0 ){
+			strcpy(chatPipeName, chatClosingName);
+		}
+		chatPipe = open(chatPipeName, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	}
+	unlink(chatPipeName);
+	if (chatPipe >= 0) {
+		close(chatPipe);
+	}
+#endif
 }
 
-bool CJKTransfer::Open(HWND hwnd, UINT msg, bool bEnablePost, DWORD processID)
+#ifdef _WIN32
+bool CJKTransfer::Open(HWND hwnd, UINT msg, bool bEnablePost, int processID)
+#else
+bool CJKTransfer::Open(CAutoResetEvent *recvPostEvent, bool bEnablePost, int processID)
+#endif
 {
 	Close();
 	currentJKID_ = -1;
 	chatBuf_.clear();
 	postStr_.clear();
-	return CreateWorker(hwnd, msg, bEnablePost, processID);
+#ifdef _WIN32
+	hwndRecvPost_ = hwnd;
+	recvPostMsg_ = msg;
+#else
+	recvPostEvent_ = recvPostEvent;
+#endif
+	return CreateWorker(bEnablePost, processID);
 }
 
 bool CJKTransfer::SendChat(int jkID, const char *text)
 {
-	if (bWorkerCreated_) {
+	if (workerThread_.joinable()) {
 		lock_recursive_mutex lock(workerLock_);
 		currentJKID_ = jkID;
 		chatBuf_.insert(chatBuf_.end(), text, text + strlen(text));
+#ifdef _WIN32
 		chatBuf_.push_back('\r');
+#endif
 		chatBuf_.push_back('\n');
-		SetEvent(hWorkerEvent_);
+		workerEvent_.Set();
 		return true;
 	}
 	return false;
@@ -286,7 +440,7 @@ bool CJKTransfer::SendChat(int jkID, const char *text)
 std::string CJKTransfer::ProcessRecvPost()
 {
 	std::string ret;
-	if (bWorkerCreated_) {
+	if (workerThread_.joinable()) {
 		lock_recursive_mutex lock(workerLock_);
 		ret.swap(postStr_);
 	}

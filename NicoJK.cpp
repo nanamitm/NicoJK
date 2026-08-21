@@ -294,15 +294,11 @@ CNicoJK::CNicoJK()
 	, bPostToRefuge_(false)
 	, bPostToRefugeInverted_(false)
 	, bRecording_(false)
-	, hQuitCheckRecordingEvent_(nullptr)
 	, bUsingLogfileDriver_(false)
 	, bSetStreamCallback_(false)
 	, bResyncComment_(false)
 	, bNicoReceivingPastChat_(false)
 	, bRefugeReceivingPastChat_(false)
-	, currentLogfileJK_(-1)
-	, hLogfile_(INVALID_HANDLE_VALUE)
-	, hLogfileLock_(INVALID_HANDLE_VALUE)
 	, llftTot_(-1)
 	, pcr_(0)
 	, pcrTick_(0)
@@ -315,6 +311,8 @@ CNicoJK::CNicoJK()
 	logReader_.SetCheckIntervalMsec(READ_LOG_FOLDER_INTERVAL);
 	SETTINGS s = {};
 	s_ = s;
+	logfileCtx_.jkID = -1;
+	logfileCtx_.tick = 0;
 	pcrPids_[0] = -1;
 }
 
@@ -605,7 +603,7 @@ void CNicoJK::CheckRecordingThread(DWORD processID)
 	TCHAR pipeName[64];
 	_stprintf_s(pipeName, TEXT("\\\\.\\pipe\\View_Ctrl_BonNoWaitPipe_%d"), processID);
 
-	while (WaitForSingleObject(hQuitCheckRecordingEvent_, 2000) == WAIT_TIMEOUT) {
+	while (!quitCheckRecordingEvent_.WaitOne(2000)) {
 		// EDCBのCtrlCmdインタフェースにアクセスしてその録画状態を調べる
 		HANDLE pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (pipe != INVALID_HANDLE_VALUE) {
@@ -641,22 +639,6 @@ void CNicoJK::ToggleStreamCallback(bool bSet)
 			bSetStreamCallback_ = false;
 		}
 	}
-}
-
-std::vector<NETWORK_SERVICE_ID_ELEM>::iterator CNicoJK::LowerBoundNetworkServiceID(std::vector<NETWORK_SERVICE_ID_ELEM>::iterator first,
-                                                                                   std::vector<NETWORK_SERVICE_ID_ELEM>::iterator last, DWORD ntsID)
-{
-	NETWORK_SERVICE_ID_ELEM e;
-	e.ntsID = ntsID;
-	return std::lower_bound(first, last, e, [](const NETWORK_SERVICE_ID_ELEM &a, const NETWORK_SERVICE_ID_ELEM &b) { return a.ntsID < b.ntsID; });
-}
-
-std::vector<CNicoJK::FORCE_ELEM>::iterator CNicoJK::LowerBoundJKID(std::vector<FORCE_ELEM>::iterator first,
-                                                                   std::vector<FORCE_ELEM>::iterator last, int jkID)
-{
-	FORCE_ELEM e;
-	e.jkID = jkID;
-	return std::lower_bound(first, last, e, [](const FORCE_ELEM &a, const FORCE_ELEM &b) { return a.jkID < b.jkID; });
 }
 
 void CNicoJK::LoadFromIni()
@@ -754,15 +736,15 @@ void CNicoJK::LoadFromIni()
 	buf = GetPrivateProfileSectionBuffer(TEXT("Channels"), iniFileName_.c_str());
 	for (LPCTSTR p = buf.data(); *p; p += _tcslen(p) + 1) {
 		NETWORK_SERVICE_ID_ELEM e;
-		bool bPrior = _stscanf_s(p, TEXT("0x%x=+%d"), &e.ntsID, &e.jkID) == 2;
+		bool bPrior = _stscanf_s(p, TEXT("0x%x=+%d"), &e.first, &e.jkID) == 2;
 		if (bPrior) {
 			e.jkID |= NETWORK_SERVICE_ID_ELEM::JKID_PRIOR;
 		}
-		if (bPrior || _stscanf_s(p, TEXT("0x%x=%d"), &e.ntsID, &e.jkID) == 2) {
+		if (bPrior || _stscanf_s(p, TEXT("0x%x=%d"), &e.first, &e.jkID) == 2) {
 			// 設定ファイルの定義では上位と下位をひっくり返しているので補正
-			e.ntsID = (e.ntsID<<16) | (e.ntsID>>16);
-			std::vector<NETWORK_SERVICE_ID_ELEM>::iterator it = LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), e.ntsID);
-			if (it != ntsIDList_.end() && it->ntsID == e.ntsID) {
+			e.first = (e.first << 16) | (e.first >> 16);
+			std::vector<NETWORK_SERVICE_ID_ELEM>::iterator it = lower_bound_first(ntsIDList_.begin(), ntsIDList_.end(), e.first);
+			if (it != ntsIDList_.end() && it->first == e.first) {
 				*it = e;
 			} else {
 				ntsIDList_.insert(it, e);
@@ -794,7 +776,7 @@ void CNicoJK::LoadForceListFromIni(const tstring &logfileFolder)
 	for (size_t i = 0; i < _countof(DEFAULT_JKID_NAME_TABLE); ++i) {
 		if (DEFAULT_JKID_NAME_TABLE[i].chatStreamID) {
 			FORCE_ELEM e;
-			e.jkID = DEFAULT_JKID_NAME_TABLE[i].jkID;
+			e.first = DEFAULT_JKID_NAME_TABLE[i].first;
 			e.chatStreamID = DEFAULT_JKID_NAME_TABLE[i].chatStreamID;
 			e.refugeChatStreamID = e.chatStreamID;
 			e.force = -1;
@@ -807,10 +789,10 @@ void CNicoJK::LoadForceListFromIni(const tstring &logfileFolder)
 	std::vector<TCHAR> buf = GetPrivateProfileSectionBuffer(TEXT("ChatStreams"), iniFileName_.c_str());
 	for (LPCTSTR p = buf.data(); *p; p += _tcslen(p) + 1) {
 		FORCE_ELEM e;
-		e.jkID = _tcstol(p, nullptr, 10);
-		if (e.jkID > 0) {
+		e.first = _tcstol(p, nullptr, 10);
+		if (e.first > 0) {
 			TCHAR key[16];
-			_stprintf_s(key, TEXT("%d"), e.jkID);
+			_stprintf_s(key, TEXT("%d"), e.first);
 			tstring val = GetBufferedProfileToString(buf.data(), key, TEXT("!"));
 			if (val != TEXT("!")) {
 				bool bFirstVal = true;
@@ -839,8 +821,8 @@ void CNicoJK::LoadForceListFromIni(const tstring &logfileFolder)
 				e.force = -1;
 				e.bFixedName = false;
 				// まだなければ追加
-				std::vector<FORCE_ELEM>::iterator it = LowerBoundJKID(forceList_.begin(), forceList_.end(), e.jkID);
-				if (it == forceList_.end() || it->jkID != e.jkID) {
+				std::vector<FORCE_ELEM>::iterator it = lower_bound_first(forceList_.begin(), forceList_.end(), e.first);
+				if (it == forceList_.end() || it->first != e.first) {
 					if (!e.chatStreamID.empty() || !e.refugeChatStreamID.empty()) {
 						forceList_.insert(it, e);
 					}
@@ -857,12 +839,12 @@ void CNicoJK::LoadForceListFromIni(const tstring &logfileFolder)
 	if (!logfileFolder.empty()) {
 		EnumFindFile((logfileFolder + TEXT("\\jk*")).c_str(), [this](const WIN32_FIND_DATA &fd) {
 			FORCE_ELEM e;
-			if (!_tcsnicmp(fd.cFileName, TEXT("jk"), 2) && (e.jkID = _tcstol(&fd.cFileName[2], nullptr, 10)) > 0) {
+			if (!_tcsnicmp(fd.cFileName, TEXT("jk"), 2) && (e.first = _tcstol(&fd.cFileName[2], nullptr, 10)) > 0) {
 				e.force = -1;
 				e.bFixedName = false;
 				// まだなければ追加
-				std::vector<FORCE_ELEM>::iterator it = LowerBoundJKID(forceList_.begin(), forceList_.end(), e.jkID);
-				if (it == forceList_.end() || it->jkID != e.jkID) {
+				std::vector<FORCE_ELEM>::iterator it = lower_bound_first(forceList_.begin(), forceList_.end(), e.first);
+				if (it == forceList_.end() || it->first != e.first) {
 					forceList_.insert(it, e);
 				}
 			}
@@ -871,12 +853,9 @@ void CNicoJK::LoadForceListFromIni(const tstring &logfileFolder)
 
 	// とりあえず組み込みのチャンネル名をセットしておく
 	for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
-		JKID_NAME_ELEM e;
-		e.jkID = it->jkID;
-		const JKID_NAME_ELEM *p = std::lower_bound(
-			DEFAULT_JKID_NAME_TABLE, DEFAULT_JKID_NAME_TABLE + _countof(DEFAULT_JKID_NAME_TABLE), e,
-			[](const JKID_NAME_ELEM &a, const JKID_NAME_ELEM &b) { return a.jkID < b.jkID; });
-		if (p && p->jkID == e.jkID) {
+		const JKID_NAME_ELEM *pEnd = DEFAULT_JKID_NAME_TABLE + _countof(DEFAULT_JKID_NAME_TABLE);
+		const JKID_NAME_ELEM *p = lower_bound_first(DEFAULT_JKID_NAME_TABLE, pEnd, it->first);
+		if (p != pEnd && p->first == it->first) {
 			it->name = p->name;
 		}
 	}
@@ -885,8 +864,8 @@ void CNicoJK::LoadForceListFromIni(const tstring &logfileFolder)
 	buf = GetPrivateProfileSectionBuffer(TEXT("ChannelNames"), iniFileName_.c_str());
 	for (LPCTSTR p = buf.data(); *p; p += _tcslen(p) + 1) {
 		int jkID = _tcstol(p, nullptr, 10);
-		std::vector<FORCE_ELEM>::iterator it = LowerBoundJKID(forceList_.begin(), forceList_.end(), jkID);
-		if (it != forceList_.end() && it->jkID == jkID) {
+		std::vector<FORCE_ELEM>::iterator it = lower_bound_first(forceList_.begin(), forceList_.end(), jkID);
+		if (it != forceList_.end() && it->first == jkID) {
 			TCHAR key[16];
 			_stprintf_s(key, TEXT("%d"), jkID);
 			it->name = GetBufferedProfileToString(buf.data(), key, TEXT(""));
@@ -921,14 +900,14 @@ void CNicoJK::UpdateForceListEpgInfo()
 				ntsID = (static_cast<DWORD>(ci.ServiceID) << 16) | ci.NetworkID;
 			}
 			std::vector<NETWORK_SERVICE_ID_ELEM>::const_iterator itNts =
-				LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
-			if (itNts == ntsIDList_.end() || itNts->ntsID != ntsID || itNts->jkID <= 0) {
+				lower_bound_first(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
+			if (itNts == ntsIDList_.end() || itNts->first != ntsID || itNts->jkID <= 0) {
 				continue;
 			}
 
 			int jkID = itNts->jkID & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR;
-			std::vector<FORCE_ELEM>::iterator itForce = LowerBoundJKID(forceList_.begin(), forceList_.end(), jkID);
-			if (itForce == forceList_.end() || itForce->jkID != jkID) {
+			std::vector<FORCE_ELEM>::iterator itForce = lower_bound_first(forceList_.begin(), forceList_.end(), jkID);
+			if (itForce == forceList_.end() || itForce->first != jkID) {
 				continue;
 			}
 			if (!itForce->bHasEpgInfo || (itNts->jkID & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
@@ -1197,62 +1176,69 @@ bool CNicoJK::IsMatchDriverName(LPCTSTR drivers)
 
 // 指定した実況IDのログファイルに書き込む
 // jkIDが負値のときはログファイルを閉じる
-void CNicoJK::WriteToLogfile(int jkID, const char *text)
+void CNicoJK::WriteToLogfile(LOGFILE_CONTEXT &ctx, int jkID, const char *text)
 {
 	if (s_.logfileFolder.empty() || s_.logfileMode == 0 || s_.logfileMode == 1 && !bRecording_) {
 		// ログを記録しない
 		jkID = -1;
 	}
-	if (currentLogfileJK_ >= 0 && currentLogfileJK_ != jkID) {
+	if (ctx.jkID >= 0 && ctx.jkID != jkID) {
 		// 閉じる
-		CloseHandle(hLogfile_);
-		CloseHandle(hLogfileLock_);
+		CloseHandle(ctx.hFile);
+		CloseHandle(ctx.hLockfile);
 		// ロックファイルを削除
 		TCHAR name[64];
-		_stprintf_s(name, TEXT("\\jk%d\\lockfile"), currentLogfileJK_);
+		_stprintf_s(name, TEXT("\\jk%d\\lockfile"), ctx.jkID);
 		DeleteFile((s_.logfileFolder + name).c_str());
-		currentLogfileJK_ = -1;
+		ctx.jkID = -1;
 		OutputMessageLog(TEXT("ログファイルの書き込みを終了しました。"));
 	}
-	if (currentLogfileJK_ < 0 && jkID >= 0) {
+	if (ctx.jkID < 0 && jkID >= 0) {
+		DWORD tick = GetTickCount();
 		unsigned int tm;
-		TCHAR name[64];
-		_stprintf_s(name, TEXT("\\jk%d"), jkID);
-		tstring path = s_.logfileFolder + name;
-		if (CLogReader::GetChatDate(&tm, text) &&
-		    (GetFileAttributes(path.c_str()) != INVALID_FILE_ATTRIBUTES || CreateDirectory(path.c_str(), nullptr))) {
-			// ロックファイルを開く
-			path += TEXT("\\lockfile");
-			hLogfileLock_ = CreateFile(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-			if (hLogfileLock_ != INVALID_HANDLE_VALUE) {
-				// 開く
-				_stprintf_s(name, TEXT("\\jk%d\\%010u.txt"), jkID, tm);
-				hLogfile_ = CreateFile((s_.logfileFolder + name).c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-				if (hLogfile_ != INVALID_HANDLE_VALUE) {
-					// ヘッダを書き込む(別に無くてもいい)
-					FILETIME ft, ftUtc = LongLongToFileTime(UnixTimeToFileTime(tm));
-					FileTimeToLocalFileTime(&ftUtc, &ft);
-					SYSTEMTIME st;
-					FileTimeToSystemTime(&ft, &st);
-					char header[128];
-					int len = sprintf_s(header, "<!-- NicoJK logfile from %04d-%02d-%02dT%02d:%02d:%02d -->\r\n",
-					                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-					DWORD written;
-					WriteFile(hLogfile_, header, len, &written, nullptr);
-					currentLogfileJK_ = jkID;
-					OutputMessageLog((tstring(TEXT("ログ\"")) + &name[1] + TEXT("\"の書き込みを開始しました。")).c_str());
-				} else {
-					CloseHandle(hLogfileLock_);
-					DeleteFile(path.c_str());
+		if ((ctx.tick == 0 || tick - ctx.tick >= READ_LOG_FOLDER_INTERVAL) && CLogReader::GetChatDate(&tm, text)) {
+			ctx.tick = tick;
+			TCHAR name[64];
+			_stprintf_s(name, TEXT("\\jk%d"), jkID);
+			tstring path = s_.logfileFolder + name;
+			if (GetFileAttributes(path.c_str()) != INVALID_FILE_ATTRIBUTES || CreateDirectory(path.c_str(), nullptr)) {
+				// ロックファイルを開く
+				path += TEXT("\\lockfile");
+				ctx.hLockfile = CreateFile(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+				if (ctx.hLockfile != INVALID_HANDLE_VALUE) {
+					// 開く
+					_stprintf_s(name, TEXT("\\jk%d\\%010u.txt"), jkID, tm);
+					ctx.hFile = CreateFile((s_.logfileFolder + name).c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+					if (ctx.hFile != INVALID_HANDLE_VALUE) {
+						// ヘッダを書き込む(別に無くてもいい)
+						FILETIME ft, ftUtc = LongLongToFileTime(UnixTimeToFileTime(tm));
+						FileTimeToLocalFileTime(&ftUtc, &ft);
+						SYSTEMTIME st;
+						FileTimeToSystemTime(&ft, &st);
+						char header[128];
+						int len = sprintf_s(header, "<!-- NicoJK logfile from %04d-%02d-%02dT%02d:%02d:%02d -->\r\n",
+						                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+						DWORD written;
+						WriteFile(ctx.hFile, header, len, &written, nullptr);
+						ctx.jkID = jkID;
+						ctx.tick = 0;
+						OutputMessageLog((tstring(TEXT("ログ\"")) + &name[1] + TEXT("\"の書き込みを開始しました。")).c_str());
+					} else {
+						CloseHandle(ctx.hLockfile);
+						DeleteFile(path.c_str());
+					}
 				}
 			}
 		}
+	} else {
+		ctx.tick = 0;
 	}
 	// 開いてたら書き込む
-	if (currentLogfileJK_ >= 0) {
+	if (ctx.jkID >= 0) {
+		ctx.buf = text;
+		ctx.buf += "\r\n";
 		DWORD written;
-		WriteFile(hLogfile_, text, static_cast<DWORD>(strlen(text)), &written, nullptr);
-		WriteFile(hLogfile_, "\r\n", 2, &written, nullptr);
+		WriteFile(ctx.hFile, ctx.buf.c_str(), static_cast<DWORD>(ctx.buf.size()), &written, nullptr);
 	}
 }
 
@@ -3373,7 +3359,7 @@ void CNicoJK::SendForceListWV2Update()
 		const tstring* pEventName = &it.eventName;
 		tstring wsEventName;
 		if (it.eventName.empty() && !programTitleMap_.empty()) {
-			auto pit = programTitleMap_.find(it.jkID);
+			auto pit = programTitleMap_.find(it.first);
 			if (pit != programTitleMap_.end() && !pit->second.empty()) {
 				wsEventName = pit->second;
 				pEventName = &wsEventName;
@@ -3382,7 +3368,7 @@ void CNicoJK::SendForceListWV2Update()
 		if (!first) json += L",";
 		first = false;
 		json += L"{\"id\":";
-		json += std::to_wstring(it.jkID);
+		json += std::to_wstring(it.first);
 		json += L",\"fo\":";
 		json += std::to_wstring(it.force);
 		json += L",\"nm\":\"";
@@ -3883,10 +3869,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							processID = _tcstoul(argv[i + 1], nullptr, 10);
 							if (processID != 0 && s_.bCheckProcessRecording) {
 								// 録画状態をチェックするスレッドを起動
-								hQuitCheckRecordingEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-								if (hQuitCheckRecordingEvent_) {
-									checkRecordingThread_ = std::thread([this, processID]() { CheckRecordingThread(processID); });
-								}
+								quitCheckRecordingEvent_.Reset();
+								checkRecordingThread_ = std::thread([this, processID]() { CheckRecordingThread(processID); });
 							}
 							break;
 						}
@@ -4102,11 +4086,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 			programTitleMap_.clear();
 			// 録画状態をチェックするスレッドを終了
-			if (hQuitCheckRecordingEvent_) {
-				SetEvent(hQuitCheckRecordingEvent_);
+			if (checkRecordingThread_.joinable()) {
+				quitCheckRecordingEvent_.Set();
 				checkRecordingThread_.join();
-				CloseHandle(hQuitCheckRecordingEvent_);
-				hQuitCheckRecordingEvent_ = nullptr;
 			}
 			// パネルアイテムのサブクラス化を解除
 			if (hPanel_) {
@@ -4147,7 +4129,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			s_.commentOpacity = (s_.commentOpacity&~0xFF) | commentWindow_.GetOpacity();
 			s_.bSetRelative = SendDlgItemMessage(hwnd, IDC_CHECK_RELATIVE, BM_GETCHECK, 0, 0) == BST_CHECKED;
 			// ログファイルを閉じる
-			WriteToLogfile(-1);
+			WriteToLogfile(logfileCtx_, -1);
 			ReadFromLogfile(-1);
 			if (bSpecFile_) {
 				DeleteFile(tmpSpecFileName_.c_str());
@@ -4290,7 +4272,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				} else if (!channelWsConnected_) {
 					for (auto it = forceList_.begin(); it != forceList_.end(); ++it) {
 						// 自力計算による勢い情報を使う
-						it->force = it->jkID == currentJK_ ? currentJKForceByChatCount_ : -1;
+						it->force = it->first == currentJK_ ? currentJKForceByChatCount_ : -1;
 					}
 					SendMessage(hwnd, WM_UPDATE_LIST, 2, 0);
 				}
@@ -4300,14 +4282,14 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			SetTimer(hwnd, TIMER_JK_WATCHDOG, max(JK_WATCHDOG_INTERVAL, 10000), nullptr);
 			if (currentJKToGet_ >= 0 && !bUsingLogfileDriver_) {
 				// chatStreamIDに変換
-				std::vector<FORCE_ELEM>::const_iterator it = LowerBoundJKID(forceList_.begin(), forceList_.end(), currentJKToGet_);
-				if (it != forceList_.end() && it->jkID == currentJKToGet_) {
+				std::vector<FORCE_ELEM>::const_iterator it = lower_bound_first(forceList_.begin(), forceList_.end(), currentJKToGet_);
+				if (it != forceList_.end() && it->first == currentJKToGet_) {
 					if (!it->refugeChatStreamID.empty() && !s_.refugeUri.empty()) {
 						// 避難所に接続
 						std::string uri = s_.refugeUri;
 						for (size_t i; (i = uri.find("{jkID}")) != std::string::npos;) {
 							char text[16];
-							sprintf_s(text, "jk%d", it->jkID);
+							sprintf_s(text, "jk%d", it->first);
 							uri.replace(i, sizeof("{jkID}") - 1, text);
 						}
 						for (size_t i; (i = uri.find("{chatStreamID}")) != std::string::npos;) {
@@ -4461,8 +4443,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				// 視聴状態が変化したので視聴中のサービスに対応する実況IDを調べて変更する
 				KillTimer(hwnd, TIMER_SETUP_CURJK);
 				DWORD ntsID = GetCurrentNetworkServiceID();
-				std::vector<NETWORK_SERVICE_ID_ELEM>::const_iterator it = LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
-				int jkID = it != ntsIDList_.end() && (it->ntsID == ntsID || (!(ntsID & 0xFFFF) && ntsID == (it->ntsID & 0xFFFF0000))) && it->jkID > 0 ?
+				std::vector<NETWORK_SERVICE_ID_ELEM>::const_iterator it = lower_bound_first(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
+				int jkID = it != ntsIDList_.end() && (it->first == ntsID || (!(ntsID & 0xFFFF) && ntsID == (it->first & 0xFFFF0000))) && it->jkID > 0 ?
 					(it->jkID & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR) : -1;
 				if (currentJKToGet_ != jkID) {
 					currentJKToGet_ = jkID;
@@ -4635,8 +4617,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 						std::cmatch mVideo;
 						if (std::regex_search(m[2].first, m[2].second, mVideo, reVideo)) {
 							int jkID = strtol(mVideo[1].first, nullptr, 10);
-							std::vector<FORCE_ELEM>::iterator it = LowerBoundJKID(forceList_.begin(), forceList_.end(), jkID);
-							if (it != forceList_.end() && it->jkID == jkID) {
+							std::vector<FORCE_ELEM>::iterator it = lower_bound_first(forceList_.begin(), forceList_.end(), jkID);
+							if (it != forceList_.end() && it->first == jkID) {
 								// 勢いと(もしあれば)名前を上書き
 								std::cmatch mForce, mName;
 								it->force = std::regex_search(m[2].first, m[2].second, mForce, reForce) ? strtol(mForce[1].first, nullptr, 10) : -1;
@@ -4674,8 +4656,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 					for (int stage = 0; stage < 2 && !bSelected; ++stage) {
 						DWORD ntsID;
 						for (int i = 0; GetChannelNetworkServiceID(currentTuning, i, &ntsID); ++i) {
-							auto it = LowerBoundNetworkServiceID(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
-							int chJK = it != ntsIDList_.end() && it->ntsID == ntsID ? it->jkID : -1;
+							auto it = lower_bound_first(ntsIDList_.begin(), ntsIDList_.end(), ntsID);
+							int chJK = it != ntsIDList_.end() && it->first == ntsID ? it->jkID : -1;
 							if ((stage > 0 || (chJK & NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) && jkID == (chJK & ~NETWORK_SERVICE_ID_ELEM::JKID_PRIOR)) {
 								if (ntsID != currentNtsID) {
 									TVTest::ChannelSelectInfo cinfo = {};
@@ -4712,8 +4694,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			for (const auto& ch : pMsg->channels) {
 				// 勢い値を更新
 				if (ch.hasForce) {
-					auto it = LowerBoundJKID(forceList_.begin(), forceList_.end(), ch.id);
-					if (it != forceList_.end() && it->jkID == ch.id)
+					auto it = lower_bound_first(forceList_.begin(), forceList_.end(), ch.id);
+					if (it != forceList_.end() && it->first == ch.id)
 						it->force = ch.force;
 				}
 				// 番組タイトルを更新
@@ -4747,7 +4729,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			if (ret < 0) {
 				// 切断
 				OutputMessageLog(TEXT("コメントサーバとの接続を終了しました。"));
-				WriteToLogfile(-1);
+				WriteToLogfile(logfileCtx_, -1);
 				currentJK_ = -1;
 				ApplyLogWV2Theme();
 				if (bPostToRefugeInverted_) {
@@ -4766,21 +4748,19 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 						break;
 					}
 					*itEnd = '\0';
-					if (itEnd - it >= CLogReader::CHAT_TAG_MAX) {
-						*(it + CLogReader::CHAT_TAG_MAX - 1) = '\0';
-					}
 					const char *rpl = &*it;
 					if (!strncmp(rpl, "<chat ", 6)) {
 						// 指定ファイル再生中は混じると鬱陶しいので表示しない。後退指定はある程度反映
 						bool bRefuge = false;
-						if (ProcessChatTag(rpl, !bSpecFile_, static_cast<int>(min(max(-forwardOffset_, 0LL), 30000LL)), &bRefuge)) {
+						if (itEnd - it < CLogReader::CHAT_TAG_MAX &&
+						    ProcessChatTag(rpl, !bSpecFile_, static_cast<int>(min(max(-forwardOffset_, 0LL), 30000LL)), &bRefuge)) {
 							bool bReceivingPastChat = bRefuge ? bRefugeReceivingPastChat_ : bNicoReceivingPastChat_;
 #ifdef _DEBUG
 							OutputDebugString(bReceivingPastChat ? TEXT("#P#") : TEXT("#L#"));
 #endif
 							// ログの不整合を避けるため過去のコメントは保存しない
 							if (!bReceivingPastChat) {
-								WriteToLogfile(currentJK_, rpl);
+								WriteToLogfile(logfileCtx_, currentJK_, rpl);
 							}
 							jkTransfer_.SendChat(currentJK_, rpl);
 							++currentJKChatCount_;
@@ -4813,6 +4793,7 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							            !isRefuge ? TEXT("ニコニコ実況") : s_.refugeUri.find("nx-jikkyo") != std::string::npos ? TEXT("NX-Jikkyo") : TEXT("避難所"),
 							            isLoggedIn ? TEXT("login=") : TEXT(""), nickname);
 							OutputMessageLog(text);
+							jkTransfer_.SendChat(currentJK_, rpl);
 						} else if (std::regex_search(rpl, m, reXDisconnect)) {
 							// 混合接続時に個々切断した
 							int status = strtol(m[1].first, nullptr, 10);
@@ -4824,11 +4805,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 							// 過去のコメントの出力状態をリセット
 							(isRefuge ? bRefugeReceivingPastChat_ : bNicoReceivingPastChat_) = false;
 							OutputMessageLog(text);
-						} else if (std::regex_search(rpl, m, reXPastChatBegin)) {
+							jkTransfer_.SendChat(currentJK_, rpl);
+						} else if (std::regex_search(rpl, reXPastChatBegin)) {
 							// 過去のコメントの出力開始
 							bool isRefuge = std::regex_search(rpl, reIsRefuge);
 							(isRefuge ? bRefugeReceivingPastChat_ : bNicoReceivingPastChat_) = true;
-						} else if (std::regex_search(rpl, m, reXPastChatEnd)) {
+						} else if (std::regex_search(rpl, reXPastChatEnd)) {
 							// 過去のコメントの出力終了
 							bool isRefuge = std::regex_search(rpl, reIsRefuge);
 							(isRefuge ? bRefugeReceivingPastChat_ : bNicoReceivingPastChat_) = false;

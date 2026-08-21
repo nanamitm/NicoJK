@@ -120,7 +120,7 @@ private:
 		bool bUsePanel;
 	};
 	struct FORCE_ELEM {
-		int jkID;
+		int first; // jkID
 		int force;
 		bool bFixedName;
 		tstring name;
@@ -160,15 +160,18 @@ private:
 		void SetEnabled(bool b);
 		bool SetPattern(LPCTSTR patt);
 	};
+	struct LOGFILE_CONTEXT {
+		int jkID;
+		DWORD tick;
+		HANDLE hFile;
+		HANDLE hLockfile;
+		std::string buf;
+	};
 	bool TogglePlugin(bool bEnabled);
 	void TogglePanelPopup();
 	void ToggleStreamCallback(bool bSet);
 	void SyncThread();
 	void CheckRecordingThread(DWORD processID);
-	static std::vector<NETWORK_SERVICE_ID_ELEM>::iterator LowerBoundNetworkServiceID(std::vector<NETWORK_SERVICE_ID_ELEM>::iterator first,
-	                                                                                 std::vector<NETWORK_SERVICE_ID_ELEM>::iterator last, DWORD ntsID);
-	static std::vector<FORCE_ELEM>::iterator LowerBoundJKID(std::vector<FORCE_ELEM>::iterator first,
-	                                                        std::vector<FORCE_ELEM>::iterator last, int jkID);
 	void LoadFromIni();
 	void SaveToIni();
 	void LoadForceListFromIni(const tstring &logfileFolder);
@@ -183,7 +186,7 @@ private:
 	bool GetChannelNetworkServiceID(int tuningSpace, int channelIndex, DWORD *pNtsID);
 	LONGLONG GetCurrentTot();
 	bool IsMatchDriverName(LPCTSTR drivers);
-	void WriteToLogfile(int jkID, const char *text = nullptr);
+	void WriteToLogfile(LOGFILE_CONTEXT &ctx, int jkID, const char *text = nullptr);
 	bool ReadFromLogfile(int jkID, const char **text = nullptr, unsigned int tmToRead = 0);
 	static LRESULT CALLBACK EventCallback(UINT Event, LPARAM lParam1, LPARAM lParam2, void *pClientData);
 	static BOOL CALLBACK WindowMsgCallback(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT *pResult, void *pUserData);
@@ -304,15 +307,13 @@ private:
 	// 過去ログ関係
 	std::atomic_bool bRecording_;
 	std::thread checkRecordingThread_;
-	HANDLE hQuitCheckRecordingEvent_;
+	CAutoResetEvent quitCheckRecordingEvent_;
 	bool bUsingLogfileDriver_;
 	bool bSetStreamCallback_;
 	bool bResyncComment_;
 	bool bNicoReceivingPastChat_;
 	bool bRefugeReceivingPastChat_;
-	int currentLogfileJK_;
-	HANDLE hLogfile_;
-	HANDLE hLogfileLock_;
+	LOGFILE_CONTEXT logfileCtx_;
 	CLogReader logReader_;
 	LONGLONG llftTot_;
 	LONGLONG llftTotLast_;
@@ -326,7 +327,7 @@ private:
 	int pcrPid_;
 	int pcrPids_[8];
 	int pcrPidCounts_[8];
-	recursive_mutex_ streamLock_;
+	std::recursive_mutex streamLock_;
 
 	// 指定ファイル再生
 	bool bSpecFile_;
