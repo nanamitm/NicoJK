@@ -11,6 +11,7 @@
 !*.txt
 !*.vcxproj
 !*.vcxproj.filters
+!*.yml
 !.gitignore
 !Makefile
 !README

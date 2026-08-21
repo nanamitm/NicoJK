@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v20260821)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # windows-latest が VS18 系に更新され v143 ツールセットが消えたため固定 (MSB8020 回避)
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Get version
+        id: version
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $v = '${{ github.ref_name }}'
+          } elseif ('${{ github.event.inputs.version }}') {
+            $v = '${{ github.event.inputs.version }}'
+          } else {
+            $v = 'manual-${{ github.run_number }}'
+          }
+          Write-Output "VERSION=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
+
+      # NuGetもvcpkgも使わない (WebView2はWebView2LoaderStatic.libを同梱、zlibはソース同梱)
+      - name: Build
+        shell: pwsh
+        run: |
+          foreach ($p in @('Win32', 'x64')) {
+            msbuild /m /p:Configuration=Release /p:Platform=$p NicoJK.sln
+            if ($LASTEXITCODE -ne 0) { throw "build failed: $p" }
+          }
+
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          $dir = "dist/NicoJK-$env:VERSION"
+          New-Item -ItemType Directory -Force -Path "$dir/x86", "$dir/x64" | Out-Null
+          # Win32構成の出力はRelease/、x64構成の出力はx64/Release/
+          Copy-Item 'Release/NicoJK.tvtp', 'Release/jkimlog.exe', 'Release/jkrdlog.exe' "$dir/x86/"
+          Copy-Item 'x64/Release/NicoJK.tvtp', 'x64/Release/jkimlog.exe', 'x64/Release/jkrdlog.exe' "$dir/x64/"
+          Copy-Item 'NicoJK.ini', 'Readme.txt', 'ChangeLog.txt', 'jkch.sh.txt' $dir
+          Compress-Archive -Path $dir -DestinationPath "dist/NicoJK-$env:VERSION.zip"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: NicoJK-${{ steps.version.outputs.VERSION }}
+          path: dist/NicoJK-${{ steps.version.outputs.VERSION }}.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          generate_release_notes: true
+          files: dist/NicoJK-${{ steps.version.outputs.VERSION }}.zip
+          body: |
+            コメント投稿にはブラウザーログインに対応したjkcnslが必要です。
+            https://github.com/nanamitm/jkcnsl/releases
