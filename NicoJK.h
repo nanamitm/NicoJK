@@ -204,9 +204,8 @@ private:
 	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
 	void RequestJkcnslLoginSettings();
 	bool SendJkcnslCacheServerUrl(LPCTSTR url);
-	bool StartJkcnslLogin(LPCTSTR mail, LPCTSTR password);
-	bool ClearJkcnslLoginSettings();
-	bool SendJkcnslLoginOtp(LPCTSTR otp);
+	bool StartJkcnslLogin();
+	bool LogoutJkcnsl();
 	bool CancelJkcnslLogin();
 	void ProcessJkcnslLoginRecv();
 	void ProcessJkcnslLoginSettingsRecv();
@@ -244,9 +243,7 @@ private:
 	HWND hHelpWindow_;
 	HWND hHelpEdit_;
 	HWND hLoginWindow_;
-	HWND hLoginMailEdit_;
-	HWND hLoginPasswordEdit_;
-	HWND hLoginOtpEdit_;
+	HWND hLoginState_;
 	HWND hLoginStatus_;
 	HWND hLoginLastLogin_;
 	HWND hLoginCacheUrlEdit_;
@@ -290,8 +287,10 @@ private:
 	std::vector<char> jkBuf_;
 	std::vector<char> loginBuf_;
 	std::vector<char> loginSettingsBuf_;
-	std::string loginMail_;
-	std::string loginPassword_;
+	// jkcnslにセッションクッキーが保存されているか (Sの応答から判定)
+	bool loginHasCookie_;
+	// ログイン用ブラウザーが見つからない旨をjkcnslが報告したか
+	bool loginHelperMissing_;
 	int loginState_;
 	int loginSettingsState_;
 	int currentJKToGet_;
