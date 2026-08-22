@@ -13,6 +13,10 @@ on:
 permissions:
   contents: write
 
+env:
+  JKCNSL_VERSION: v20260821
+  JKCNSL_SHA256: 44721fdff4633d93953acfbcf78a5be9d1dc1639b3efd9049616b6c9b0bc621f
+
 jobs:
   build:
     # windows-latest が VS18 系に更新され v143 ツールセットが消えたため固定 (MSB8020 回避)
@@ -20,6 +24,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # jkcnslのライセンスとREADMEを、成果物と同じタグから取得する。
+      - name: Checkout jkcnsl metadata
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nanamitm/jkcnsl
+          ref: ${{ env.JKCNSL_VERSION }}
+          path: jkcnsl-source
 
       - name: Get version
         id: version
@@ -47,6 +59,35 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "build failed: $p" }
           }
 
+      - name: Download jkcnsl release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = "jkcnsl-windows-x64-$env:JKCNSL_VERSION.zip"
+          New-Item -ItemType Directory -Force -Path 'dist/jkcnsl-download' | Out-Null
+          gh release download $env:JKCNSL_VERSION `
+            --repo nanamitm/jkcnsl `
+            --pattern $asset `
+            --dir 'dist/jkcnsl-download'
+          if ($LASTEXITCODE -ne 0) { throw "jkcnsl download failed: $asset" }
+
+          $archive = Join-Path 'dist/jkcnsl-download' $asset
+          $actualHash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:JKCNSL_SHA256) {
+            throw "jkcnsl checksum mismatch: expected $env:JKCNSL_SHA256, actual $actualHash"
+          }
+
+          Expand-Archive -LiteralPath $archive -DestinationPath 'dist/jkcnsl-expanded'
+          if (-not (Test-Path 'dist/jkcnsl-expanded/jkcnsl/jkcnsl.exe')) {
+            throw 'jkcnsl.exe was not found in the release archive'
+          }
+          if (-not (Test-Path 'dist/jkcnsl-expanded/jkcnsl/jkcnsl_login/jkcnsl-qt-login.exe')) {
+            throw 'jkcnsl browser login helper was not found in the release archive'
+          }
+          Copy-Item 'jkcnsl-source/License.txt', 'jkcnsl-source/Readme.txt' `
+            'dist/jkcnsl-expanded/jkcnsl/'
+
       - name: Package
         shell: pwsh
         env:
@@ -58,6 +99,7 @@ jobs:
           Copy-Item 'Release/NicoJK.tvtp', 'Release/jkimlog.exe', 'Release/jkrdlog.exe' "$dir/x86/"
           Copy-Item 'x64/Release/NicoJK.tvtp', 'x64/Release/jkimlog.exe', 'x64/Release/jkrdlog.exe' "$dir/x64/"
           Copy-Item 'NicoJK.ini', 'Readme.txt', 'ChangeLog.txt', 'jkch.sh.txt' $dir
+          Copy-Item -Recurse 'dist/jkcnsl-expanded/jkcnsl' "$dir/jkcnsl"
           Compress-Archive -Path $dir -DestinationPath "dist/NicoJK-$env:VERSION.zip"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -73,5 +115,5 @@ jobs:
           generate_release_notes: true
           files: dist/NicoJK-${{ steps.version.outputs.VERSION }}.zip
           body: |
-            コメント投稿にはブラウザーログインに対応したjkcnslが必要です。
-            https://github.com/nanamitm/jkcnsl/releases
+            ブラウザーログインに対応したjkcnsl ${{ env.JKCNSL_VERSION }} を同梱しています。
+            `jkcnsl` フォルダの中身をTVTest.exeのあるフォルダに配置してください。
