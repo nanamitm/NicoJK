@@ -202,11 +202,14 @@ private:
 	void ShowLocalCommandHelp();
 	void ShowNicoLoginWindow();
 	void UpdateNicoLoginWindowState(LPCTSTR status = nullptr);
-	void RequestJkcnslLoginSettings();
+	void RequestJkcnslLoginSettings(bool bAfterLogin = false);
 	bool SendJkcnslCacheServerUrl(LPCTSTR url);
 	bool StartJkcnslLogin();
 	bool LogoutJkcnsl();
 	bool CancelJkcnslLogin();
+	void CloseLoginHelperWait();
+	void OnLoginHelperExit();
+	static VOID CALLBACK LoginHelperWaitCallback(PVOID lpParameter, BOOLEAN timerOrWaitFired);
 	void ProcessJkcnslLoginRecv();
 	void ProcessJkcnslLoginSettingsRecv();
 	static LRESULT CALLBACK PanelWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -245,7 +248,6 @@ private:
 	HWND hLoginWindow_;
 	HWND hLoginState_;
 	HWND hLoginStatus_;
-	HWND hLoginLastLogin_;
 	HWND hLoginCacheUrlEdit_;
 	Microsoft::WRL::ComPtr<ICoreWebView2Controller> pLogWV2Controller_;
 	Microsoft::WRL::ComPtr<ICoreWebView2>           pLogWV2_;
@@ -289,8 +291,9 @@ private:
 	std::vector<char> loginSettingsBuf_;
 	// jkcnslにセッションクッキーが保存されているか (Sの応答から判定)
 	bool loginHasCookie_;
-	// ログイン用ブラウザーが見つからない旨をjkcnslが報告したか
-	bool loginHelperMissing_;
+	// 起動中のJkcnslLoginWindow.exeとその終了待ち
+	HANDLE hLoginHelperProcess_;
+	HANDLE hLoginHelperWait_;
 	int loginState_;
 	int loginSettingsState_;
 	int currentJKToGet_;

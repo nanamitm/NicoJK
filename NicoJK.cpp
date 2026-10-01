@@ -107,6 +107,7 @@ const UINT WM_GET_LOG_LIST_NG_STATE = WM_APP + 110;
 const UINT WMS_LOGIN_SETTINGS = WM_APP + 111;
 const UINT WMS_CHANNEL_WS    = WM_APP + 113;
 const UINT WMS_FORCE_LIST_SEL  = WM_APP + 116;
+const UINT WMS_LOGIN_HELPER_EXIT = WM_APP + 117;
 
 const UINT ID_FORCE_LIST_COPY = 1;
 const UINT ID_FORCE_LIST_TOGGLE_NG = 2;
@@ -116,7 +117,6 @@ enum {
 	IDC_LOGIN_LABEL_INFO = 2001,
 	IDC_LOGIN_STATE,
 	IDC_LOGIN_STATUS,
-	IDC_LOGIN_LAST_LOGIN,
 	IDC_LOGIN_CACHE_URL,
 	IDC_LOGIN_BUTTON_START,
 	IDC_LOGIN_BUTTON_CANCEL,
@@ -147,13 +147,12 @@ enum {
 	LOGIN_STATE_IDLE,
 	LOGIN_STATE_LOGIN,
 	LOGIN_STATE_LOGOUT,
-	LOGIN_STATE_CLEAR_MAIL,
-	LOGIN_STATE_CLEAR_PASSWORD,
 };
 
 enum {
 	LOGIN_SETTINGS_STATE_IDLE,
 	LOGIN_SETTINGS_STATE_QUERY,
+	LOGIN_SETTINGS_STATE_QUERY_AFTER_LOGIN,
 	LOGIN_SETTINGS_STATE_SET_CACHE,
 };
 
@@ -260,7 +259,6 @@ CNicoJK::CNicoJK()
 	, hLoginWindow_(nullptr)
 	, hLoginState_(nullptr)
 	, hLoginStatus_(nullptr)
-	, hLoginLastLogin_(nullptr)
 	, hLoginCacheUrlEdit_(nullptr)
 	, hForceFont_(nullptr)
 	, bDisplayLogList_(false)
@@ -276,7 +274,8 @@ CNicoJK::CNicoJK()
 	, forwardOffsetDelta_(0)
 	, loginState_(LOGIN_STATE_IDLE)
 	, loginHasCookie_(false)
-	, loginHelperMissing_(false)
+	, hLoginHelperProcess_(nullptr)
+	, hLoginHelperWait_(nullptr)
 	, loginSettingsState_(LOGIN_SETTINGS_STATE_IDLE)
 	, currentJKToGet_(-1)
 	, currentJK_(-1)
@@ -1675,7 +1674,7 @@ void CNicoJK::ShowNicoLoginWindow()
 		int x = rc.left ? rc.left + 48 : CW_USEDEFAULT;
 		int y = rc.top ? rc.top + 48 : CW_USEDEFAULT;
 		int w = 520;
-		int h = 260;
+		int h = 230;
 		hLoginWindow_ = CreateWindowEx(WS_EX_TOOLWINDOW, TEXT("ru.jk.login"), TEXT("NicoJK - ニコニコログイン"),
 		                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
 		                               x, y, w, h, hForce_, nullptr, g_hinstDLL, this);
@@ -1702,15 +1701,13 @@ void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 	} else if (hLoginStatus_) {
 		switch (loginState_) {
 		case LOGIN_STATE_LOGIN:
-			SetWindowText(hLoginStatus_, TEXT("jkcnslでログインしています。"));
+			SetWindowText(hLoginStatus_, TEXT("ログイン後に「jkcnslに保存」を押して、ウィンドウを閉じてください。"));
 			break;
 		case LOGIN_STATE_LOGOUT:
-		case LOGIN_STATE_CLEAR_MAIL:
-		case LOGIN_STATE_CLEAR_PASSWORD:
-			SetWindowText(hLoginStatus_, TEXT("ログアウトしています。"));
+			SetWindowText(hLoginStatus_, TEXT("jkcnslのログイン情報を削除しています。"));
 			break;
 		default:
-			SetWindowText(hLoginStatus_, TEXT("「ログイン」を押すとブラウザーのウィンドウが開きます。"));
+			SetWindowText(hLoginStatus_, TEXT("「ログイン」を押すとJkcnslLoginWindowが開きます。"));
 			break;
 		}
 	}
@@ -1730,7 +1727,7 @@ void CNicoJK::UpdateNicoLoginWindowState(LPCTSTR status)
 	InvalidateRect(hLoginWindow_, nullptr, TRUE);
 }
 
-void CNicoJK::RequestJkcnslLoginSettings()
+void CNicoJK::RequestJkcnslLoginSettings(bool bAfterLogin)
 {
 	if (!hForce_ || !hLoginWindow_) {
 		return;
@@ -1742,16 +1739,13 @@ void CNicoJK::RequestJkcnslLoginSettings()
 		loginSettingsBuf_.clear();
 		loginSettingsState_ = LOGIN_SETTINGS_STATE_IDLE;
 	}
-	if (hLoginLastLogin_) {
-		SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 取得中..."));
-	}
 	if (hLoginCacheUrlEdit_) {
 		SetWindowText(hLoginCacheUrlEdit_, TEXT(""));
 	}
 	loginSettingsStream_.Close();
 	loginSettingsBuf_.clear();
 	if (loginSettingsStream_.Send(hForce_, WMS_LOGIN_SETTINGS, 'S', "")) {
-		loginSettingsState_ = LOGIN_SETTINGS_STATE_QUERY;
+		loginSettingsState_ = bAfterLogin ? LOGIN_SETTINGS_STATE_QUERY_AFTER_LOGIN : LOGIN_SETTINGS_STATE_QUERY;
 		UpdateNicoLoginWindowState(TEXT("jkcnsl設定を取得しています。"));
 	}
 }
@@ -1799,50 +1793,81 @@ static bool SetWindowTextUtf8(HWND hwnd, const char *text)
 	return true;
 }
 
-static bool FormatUnixTimeLocal(const char *text, LPTSTR out, size_t outSize)
+// JkcnslLoginWindow.exe(jkcnsl.exeと同じくTVTest.exeのある場所に置く)を起動する。
+// 利用者はそのウィンドウでニコニコにログインし、「jkcnslに保存」でjkcnslの
+// nicovideo_cookie設定に保存する。ウィンドウが閉じられたらjkcnslの設定を
+// 読み直してログイン状態を判定する。
+bool CNicoJK::StartJkcnslLogin()
 {
-	char *endp = nullptr;
-	unsigned long long unixTime = strtoull(text, &endp, 10);
-	if (endp == text || unixTime == 0) {
+	if (!hForce_ || loginState_ != LOGIN_STATE_IDLE) {
 		return false;
 	}
-	const unsigned long long filetimeEpoch = 11644473600ULL;
-	const unsigned long long filetimeSecond = 10000000ULL;
-	unsigned long long ftValue = (unixTime + filetimeEpoch) * filetimeSecond;
-	FILETIME ftUtc = {};
-	ftUtc.dwLowDateTime = static_cast<DWORD>(ftValue);
-	ftUtc.dwHighDateTime = static_cast<DWORD>(ftValue >> 32);
-	FILETIME ftLocal = {};
-	SYSTEMTIME st = {};
-	if (!FileTimeToLocalFileTime(&ftUtc, &ftLocal) || !FileTimeToSystemTime(&ftLocal, &st)) {
+	TCHAR helperPath[MAX_PATH + 32];
+	if (!GetLongModuleFileName(nullptr, helperPath, MAX_PATH)) {
+		UpdateNicoLoginWindowState(TEXT("JkcnslLoginWindowの起動に失敗しました。"));
 		return false;
 	}
-	_stprintf_s(out, outSize, TEXT("最終ログイン: %04u/%02u/%02u %02u:%02u"),
-	            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+	for (size_t i = _tcslen(helperPath); i > 0 && !_tcschr(TEXT("/\\"), helperPath[i - 1]); ) {
+		helperPath[--i] = TEXT('\0');
+	}
+	tstring helperDir = helperPath;
+	_tcscat_s(helperPath, TEXT("JkcnslLoginWindow.exe"));
+	if (GetFileAttributes(helperPath) == INVALID_FILE_ATTRIBUTES) {
+		UpdateNicoLoginWindowState(TEXT("JkcnslLoginWindow.exeが見つかりません。TVTest.exeと同じ場所に置いてください。"));
+		return false;
+	}
+
+	STARTUPINFO si = {};
+	si.cb = sizeof(si);
+	PROCESS_INFORMATION pi;
+	if (!CreateProcess(helperPath, nullptr, nullptr, nullptr, FALSE, 0, nullptr, helperDir.c_str(), &si, &pi)) {
+		UpdateNicoLoginWindowState(TEXT("JkcnslLoginWindowの起動に失敗しました。"));
+		return false;
+	}
+	CloseHandle(pi.hThread);
+	hLoginHelperProcess_ = pi.hProcess;
+	if (!RegisterWaitForSingleObject(&hLoginHelperWait_, hLoginHelperProcess_, LoginHelperWaitCallback, hForce_,
+	                                 INFINITE, WT_EXECUTEONLYONCE)) {
+		hLoginHelperWait_ = nullptr;
+		CloseHandle(hLoginHelperProcess_);
+		hLoginHelperProcess_ = nullptr;
+		UpdateNicoLoginWindowState(TEXT("JkcnslLoginWindowの終了を待てません。"));
+		return false;
+	}
+	loginState_ = LOGIN_STATE_LOGIN;
+	UpdateNicoLoginWindowState();
 	return true;
 }
 
-// jkcnslのブラウザー認証を開始する。jkcnslが同梱のヘルパー
-// (jkcnsl_login/jkcnsl-qt-login.exe)を起動し、利用者はそのウィンドウで
-// サインインする。2段階認証もそのウィンドウ内で完結するため、メールや
-// パスワードをこちらから渡すことはない。保存済みのセッションが有効なら
-// ウィンドウは開かず即座に完了する。
-bool CNicoJK::StartJkcnslLogin()
+VOID CALLBACK CNicoJK::LoginHelperWaitCallback(PVOID lpParameter, BOOLEAN timerOrWaitFired)
 {
-	if (!hForce_) {
-		return false;
+	static_cast<void>(timerOrWaitFired);
+	PostMessage(static_cast<HWND>(lpParameter), WMS_LOGIN_HELPER_EXIT, 0, 0);
+}
+
+// 終了待ちを解除する。JkcnslLoginWindow自体は利用者が操作中かもしれないので終了させない
+void CNicoJK::CloseLoginHelperWait()
+{
+	if (hLoginHelperWait_) {
+		// コールバックの完了まで待つ
+		UnregisterWaitEx(hLoginHelperWait_, INVALID_HANDLE_VALUE);
+		hLoginHelperWait_ = nullptr;
 	}
-	loginStream_.Close();
-	loginBuf_.clear();
-	loginHelperMissing_ = false;
-	loginState_ = LOGIN_STATE_LOGIN;
-	if (!loginStream_.Send(hForce_, WMS_LOGIN, 'A', "i")) {
-		loginState_ = LOGIN_STATE_IDLE;
-		UpdateNicoLoginWindowState(TEXT("jkcnslログイン開始に失敗しました。"));
-		return false;
+	if (hLoginHelperProcess_) {
+		CloseHandle(hLoginHelperProcess_);
+		hLoginHelperProcess_ = nullptr;
 	}
+}
+
+void CNicoJK::OnLoginHelperExit()
+{
+	if (loginState_ != LOGIN_STATE_LOGIN) {
+		return;
+	}
+	CloseLoginHelperWait();
+	loginState_ = LOGIN_STATE_IDLE;
 	UpdateNicoLoginWindowState();
-	return true;
+	RequestJkcnslLoginSettings(true);
 }
 
 bool CNicoJK::SendJkcnslCacheServerUrl(LPCTSTR url)
@@ -1875,35 +1900,42 @@ bool CNicoJK::SendJkcnslCacheServerUrl(LPCTSTR url)
 	return true;
 }
 
-// Aoでニコニコ側のセッションを破棄してから、旧方式で保存されている
-// mail/passwordの残骸も削除する。Aoは未ログインでも成功を返す。
+// jkcnslに保存されたnicovideo_cookieを削除する。ニコニコ側のセッションの破棄
+// (ブラウザーでのログアウト)はJkcnslLoginWindowで行う。
 bool CNicoJK::LogoutJkcnsl()
 {
-	if (!hForce_) {
+	if (!hForce_ || loginState_ != LOGIN_STATE_IDLE) {
 		return false;
 	}
 	loginStream_.Close();
 	loginBuf_.clear();
 	loginState_ = LOGIN_STATE_LOGOUT;
-	if (!loginStream_.Send(hForce_, WMS_LOGIN, 'A', "o")) {
+	if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', "nicovideo_cookie")) {
 		loginState_ = LOGIN_STATE_IDLE;
-		UpdateNicoLoginWindowState(TEXT("jkcnslへのログアウト要求に失敗しました。"));
+		UpdateNicoLoginWindowState(TEXT("jkcnslへのログイン情報削除要求に失敗しました。"));
 		return false;
 	}
 	UpdateNicoLoginWindowState();
 	return true;
 }
 
+static BOOL CALLBACK CloseProcessWindowsEnumProc(HWND hwnd, LPARAM lParam)
+{
+	DWORD pid;
+	if (GetWindowThreadProcessId(hwnd, &pid) && pid == static_cast<DWORD>(lParam) && IsWindowVisible(hwnd)) {
+		PostMessage(hwnd, WM_CLOSE, 0, 0);
+	}
+	return TRUE;
+}
+
 bool CNicoJK::CancelJkcnslLogin()
 {
-	if (loginState_ == LOGIN_STATE_IDLE) {
+	if (loginState_ != LOGIN_STATE_LOGIN || !hLoginHelperProcess_) {
 		return false;
 	}
-	// ブラウザーのウィンドウを待っている間もここで打ち切る
-	loginStream_.Shutdown();
-	loginState_ = LOGIN_STATE_IDLE;
-	loginBuf_.clear();
-	UpdateNicoLoginWindowState(TEXT("ニコニコログインを中止しました。"));
+	// JkcnslLoginWindowのウィンドウを閉じる。終了の通知でログイン状態を読み直す
+	EnumWindows(CloseProcessWindowsEnumProc, static_cast<LPARAM>(GetProcessId(hLoginHelperProcess_)));
+	UpdateNicoLoginWindowState(TEXT("JkcnslLoginWindowを閉じています。"));
 	return true;
 }
 
@@ -1919,13 +1951,7 @@ void CNicoJK::ProcessJkcnslLoginRecv()
 			if (!line.empty() && line.back() == '\r') {
 				line.pop_back();
 			}
-			if (line.find("jkcnsl-qt-login") != std::string::npos && line.find("not found") != std::string::npos) {
-				loginHelperMissing_ = true;
-				UpdateNicoLoginWindowState(TEXT("ログイン用ブラウザーが見つかりません。"));
-			} else if (line.find("browser window") != std::string::npos) {
-				ShowNicoLoginWindow();
-				UpdateNicoLoginWindowState(TEXT("ブラウザーのウィンドウでログインし、ウィンドウ内のボタンで完了してください。"));
-			} else if (!line.empty()) {
+			if (!line.empty()) {
 				TCHAR text[256];
 				int len = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, text, _countof(text) - 1);
 				text[max(len, 0)] = TEXT('\0');
@@ -1942,44 +1968,16 @@ void CNicoJK::ProcessJkcnslLoginRecv()
 		return;
 	}
 
-	if (ret != -2) {
-		bool bHelperMissing = loginHelperMissing_;
-		loginState_ = LOGIN_STATE_IDLE;
-		UpdateNicoLoginWindowState(bHelperMissing ?
-			TEXT("ログイン用ブラウザーが見つかりません。jkcnsl.exeと同じ場所にjkcnsl_loginフォルダーを配置してください。") :
-			TEXT("jkcnslログイン処理に失敗しました。"));
-		return;
-	}
-
-	if (loginState_ == LOGIN_STATE_LOGOUT) {
-		loginState_ = LOGIN_STATE_CLEAR_MAIL;
-		if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', "mail")) {
-			loginState_ = LOGIN_STATE_IDLE;
-			UpdateNicoLoginWindowState(TEXT("jkcnslへのログイン情報削除要求に失敗しました。"));
+	int state = loginState_;
+	loginState_ = LOGIN_STATE_IDLE;
+	if (state == LOGIN_STATE_LOGOUT) {
+		if (ret == -2) {
+			loginHasCookie_ = false;
+			UpdateNicoLoginWindowState(TEXT("jkcnslのログイン情報を削除しました。"));
 		} else {
-			UpdateNicoLoginWindowState();
+			UpdateNicoLoginWindowState(TEXT("jkcnslのログイン情報の削除に失敗しました。"));
 		}
-	} else if (loginState_ == LOGIN_STATE_CLEAR_MAIL) {
-		loginState_ = LOGIN_STATE_CLEAR_PASSWORD;
-		if (!loginStream_.Send(hForce_, WMS_LOGIN, 'S', "password")) {
-			loginState_ = LOGIN_STATE_IDLE;
-			UpdateNicoLoginWindowState(TEXT("jkcnslへのパスワード削除要求に失敗しました。"));
-		} else {
-			UpdateNicoLoginWindowState();
-		}
-	} else if (loginState_ == LOGIN_STATE_CLEAR_PASSWORD) {
-		loginState_ = LOGIN_STATE_IDLE;
-		loginHasCookie_ = false;
-		if (hLoginLastLogin_) {
-			SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 未取得"));
-		}
-		UpdateNicoLoginWindowState(TEXT("ログアウトしました。"));
-	} else if (loginState_ == LOGIN_STATE_LOGIN) {
-		loginState_ = LOGIN_STATE_IDLE;
-		UpdateNicoLoginWindowState(TEXT("ニコニコログインに成功しました。チャンネル切替または再接続後に反映されます。"));
-		RequestJkcnslLoginSettings();
 	} else {
-		loginState_ = LOGIN_STATE_IDLE;
 		UpdateNicoLoginWindowState();
 	}
 }
@@ -1996,7 +1994,7 @@ void CNicoJK::ProcessJkcnslLoginSettingsRecv()
 			if (!line.empty() && line.back() == '\r') {
 				line.pop_back();
 			}
-			// ブラウザー認証ではクッキーしか得られないので、アカウント名は表示できない。
+			// JkcnslLoginWindowが保存するのはクッキーだけなので、アカウント名は表示できない。
 			// ログイン済みかどうかは nicovideo_cookie の有無で判定する。
 			static const char cookiePrefix[] = "nicovideo_cookie ";
 			if (line.compare(0, sizeof(cookiePrefix) - 1, cookiePrefix) == 0) {
@@ -2005,18 +2003,6 @@ void CNicoJK::ProcessJkcnslLoginSettingsRecv()
 			static const char cacheUrlPrefix[] = "cache_server_url ";
 			if (line.compare(0, sizeof(cacheUrlPrefix) - 1, cacheUrlPrefix) == 0) {
 				SetWindowTextUtf8(hLoginCacheUrlEdit_, line.c_str() + sizeof(cacheUrlPrefix) - 1);
-			}
-			static const char lastLoginPrefix[] = "last_login_attempt ";
-			if (line.compare(0, sizeof(lastLoginPrefix) - 1, lastLoginPrefix) == 0 && hLoginLastLogin_) {
-				const char *lastLogin = line.c_str() + sizeof(lastLoginPrefix) - 1;
-				TCHAR text[64];
-				if (strcmp(lastLogin, "0") == 0) {
-					SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 未取得"));
-				} else if (FormatUnixTimeLocal(lastLogin, text, _countof(text))) {
-					SetWindowText(hLoginLastLogin_, text);
-				} else {
-					SetWindowText(hLoginLastLogin_, TEXT("最終ログイン: 不明"));
-				}
 			}
 			if (!pEnd) {
 				break;
@@ -2031,6 +2017,9 @@ void CNicoJK::ProcessJkcnslLoginSettingsRecv()
 		if (state == LOGIN_SETTINGS_STATE_SET_CACHE) {
 			UpdateNicoLoginWindowState(ret == -2 ? TEXT("キャッシュサーバー設定を保存しました。次回接続から反映されます。") :
 			                                      TEXT("キャッシュサーバー設定の保存に失敗しました。"));
+		} else if (state == LOGIN_SETTINGS_STATE_QUERY_AFTER_LOGIN) {
+			UpdateNicoLoginWindowState(loginHasCookie_ ? TEXT("ログイン情報を確認しました。チャンネル切替または再接続後に反映されます。") :
+			                                             TEXT("ログイン情報は保存されませんでした。"));
 		} else if (state == LOGIN_SETTINGS_STATE_QUERY) {
 			UpdateNicoLoginWindowState();
 		}
@@ -2617,8 +2606,8 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			pThis->hLoginWindow_ = hwnd;
 
 			CreateWindowEx(0, TEXT("STATIC"),
-			               TEXT("ニコニコへのログインはブラウザーのウィンドウで行います。")
-			               TEXT("2段階認証もそのウィンドウ内で完結します。"),
+			               TEXT("ニコニコへのログイン・ログアウトはJkcnslLoginWindowで行い、")
+			               TEXT("「jkcnslに保存」でjkcnslに反映します。"),
 			               WS_CHILD | WS_VISIBLE | SS_LEFT,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LABEL_INFO), g_hinstDLL, nullptr);
 			pThis->hLoginState_ = CreateWindowEx(0, TEXT("STATIC"), TEXT("ログイン状態: 未取得"),
@@ -2627,9 +2616,6 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			pThis->hLoginStatus_ = CreateWindowEx(0, TEXT("STATIC"), nullptr,
 			                                      WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
 			                                      0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_STATUS), g_hinstDLL, nullptr);
-			pThis->hLoginLastLogin_ = CreateWindowEx(0, TEXT("STATIC"), TEXT("最終ログイン: 未取得"),
-			                                         WS_CHILD | WS_VISIBLE | SS_LEFT,
-			                                         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LAST_LOGIN), g_hinstDLL, nullptr);
 			CreateWindowEx(0, TEXT("STATIC"), TEXT("キャッシュサーバー"),
 			               WS_CHILD | WS_VISIBLE | SS_LEFT,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_LABEL_CACHE_URL), g_hinstDLL, nullptr);
@@ -2642,7 +2628,7 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			CreateWindowEx(0, TEXT("BUTTON"), TEXT("中止"),
 			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_CANCEL), g_hinstDLL, nullptr);
-			CreateWindowEx(0, TEXT("BUTTON"), TEXT("ログアウト"),
+			CreateWindowEx(0, TEXT("BUTTON"), TEXT("情報削除"),
 			               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 			               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON_CLEAR), g_hinstDLL, nullptr);
 			CreateWindowEx(0, TEXT("BUTTON"), TEXT("保存"),
@@ -2651,7 +2637,7 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 
 			HFONT hFont = pThis->hForceFont_ ? pThis->hForceFont_ : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 			int itemIds[] = {
-				IDC_LOGIN_LABEL_INFO, IDC_LOGIN_STATE, IDC_LOGIN_STATUS, IDC_LOGIN_LAST_LOGIN,
+				IDC_LOGIN_LABEL_INFO, IDC_LOGIN_STATE, IDC_LOGIN_STATUS,
 				IDC_LOGIN_CACHE_URL, IDC_LOGIN_LABEL_CACHE_URL
 			};
 			for (int id : itemIds) {
@@ -2699,14 +2685,12 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 		int editW = max<int>(80, static_cast<int>(rc.right) - editX - margin);
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_INFO), margin, y, rc.right - margin * 2, infoH, TRUE);
 		y += infoH + gap;
-		// [ログイン] [中止]        [ログアウト]
+		// [ログイン] [中止]        [情報削除]
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_START), margin, y, buttonW, buttonH, TRUE);
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_CANCEL), margin + buttonW + gap, y, cancelButtonW, buttonH, TRUE);
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_BUTTON_CLEAR), rc.right - margin - clearButtonW, y, clearButtonW, buttonH, TRUE);
 		y += buttonH + gap;
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_STATE), margin, y, rc.right - margin * 2, editH, TRUE);
-		y += editH + gap;
-		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LAST_LOGIN), margin, y, rc.right - margin * 2, editH, TRUE);
 		y += editH + gap;
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_LABEL_CACHE_URL), margin, y + 3 * dpi / 96, labelW, editH, TRUE);
 		MoveWindow(GetDlgItem(hwnd, IDC_LOGIN_CACHE_URL), editX, y, max(40, editW - cacheButtonW - gap), editH, TRUE);
@@ -2830,7 +2814,6 @@ LRESULT CALLBACK CNicoJK::LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 			pThis->hLoginWindow_ = nullptr;
 			pThis->hLoginState_ = nullptr;
 			pThis->hLoginStatus_ = nullptr;
-			pThis->hLoginLastLogin_ = nullptr;
 			pThis->hLoginCacheUrlEdit_ = nullptr;
 		}
 		break;
@@ -3643,7 +3626,7 @@ void CNicoJK::UpdateWindowTheme(HWND hwnd)
 	if (hLoginWindow_) {
 		SetWindowTheme(hLoginWindow_, bDark ? L"DarkMode_Explorer" : nullptr, nullptr);
 		int loginItemIds[] = {
-			IDC_LOGIN_LABEL_INFO, IDC_LOGIN_STATE, IDC_LOGIN_STATUS, IDC_LOGIN_LAST_LOGIN,
+			IDC_LOGIN_LABEL_INFO, IDC_LOGIN_STATE, IDC_LOGIN_STATUS,
 			IDC_LOGIN_CACHE_URL, IDC_LOGIN_LABEL_CACHE_URL
 		};
 		for (int id : loginItemIds) {
@@ -4008,7 +3991,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				hLoginWindow_ = nullptr;
 				hLoginState_ = nullptr;
 				hLoginStatus_ = nullptr;
-				hLoginLastLogin_ = nullptr;
 				hLoginCacheUrlEdit_ = nullptr;
 			}
 			// 位置を保存
@@ -4025,6 +4007,8 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			}
 			commentWindow_.Destroy();
 
+			CloseLoginHelperWait();
+			loginState_ = LOGIN_STATE_IDLE;
 			channelStream_.BeginClose();
 			jkStream_.BeginClose();
 			loginStream_.BeginClose();
@@ -4724,6 +4708,9 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 		return TRUE;
 	case WMS_LOGIN_SETTINGS:
 		ProcessJkcnslLoginSettingsRecv();
+		return TRUE;
+	case WMS_LOGIN_HELPER_EXIT:
+		OnLoginHelperExit();
 		return TRUE;
 	case WMS_TRANSFER:
 		{

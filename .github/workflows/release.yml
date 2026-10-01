@@ -82,8 +82,8 @@ jobs:
           if (-not (Test-Path 'dist/jkcnsl-expanded/jkcnsl/jkcnsl.exe')) {
             throw 'jkcnsl.exe was not found in the release archive'
           }
-          if (-not (Test-Path 'dist/jkcnsl-expanded/jkcnsl/jkcnsl_login/jkcnsl-qt-login.exe')) {
-            throw 'jkcnsl browser login helper was not found in the release archive'
+          if (-not (Test-Path 'dist/jkcnsl-expanded/jkcnsl/JkcnslLoginWindow.exe')) {
+            throw 'JkcnslLoginWindow.exe was not found in the release archive'
           }
           Copy-Item 'jkcnsl-source/License.txt', 'jkcnsl-source/Readme.txt' `
             'dist/jkcnsl-expanded/jkcnsl/'
@@ -115,5 +115,5 @@ jobs:
           generate_release_notes: true
           files: dist/NicoJK-${{ steps.version.outputs.VERSION }}.zip
           body: |
-            ブラウザーログインに対応したjkcnsl ${{ env.JKCNSL_VERSION }} を同梱しています。
+            JkcnslLoginWindowを含むjkcnsl ${{ env.JKCNSL_VERSION }} を同梱しています。
             `jkcnsl` フォルダの中身をTVTest.exeのあるフォルダに配置してください。
