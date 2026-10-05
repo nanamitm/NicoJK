@@ -270,31 +270,30 @@ void CJKStream::WorkerThread()
 				PostMessage(hwndRecv_, recvMsg_, 0, 0);
 			}
 		} else {
-			lock_recursive_mutex lock(workerLock_);
-			if (bStopWorker_) {
-				DWORD dwWritten;
-				WriteFile(hWritePipe, "q\r\n", 3, &dwWritten, nullptr);
+			bool stop;
+			std::vector<char> pending;
+			{
+				lock_recursive_mutex lock(workerLock_);
+				stop = bStopWorker_;
+				if (stop) {
+					pending.assign({'q', '\r', '\n'});
+				} else if (bOpened_) {
+					if (bShutdown_ && !bShutdownSent_) {
+						pending.assign({'c', '\r', '\n'});
+						bShutdownSent_ = true;
+					} else if (!bShutdownSent_) {
+						pending.swap(sendBuf_);
+					}
+				}
+			}
+			// 子プロセスが読まない場合も、停止要求用のロックは取得できるようにする。
+			DWORD written = 0;
+			if (!pending.empty() &&
+			    (!WriteFile(hWritePipe, pending.data(), static_cast<DWORD>(pending.size()), &written, nullptr) ||
+			     written != pending.size())) {
 				break;
 			}
-			if (bOpened_) {
-				if (bShutdown_ && !bShutdownSent_) {
-					DWORD dwWritten;
-					if (!WriteFile(hWritePipe, "c\r\n", 3, &dwWritten, nullptr) || dwWritten != 3) {
-						// エラーor閉じられた
-						break;
-					}
-					bShutdownSent_ = true;
-				}
-				if (sendBuf_.empty() == false && !bShutdownSent_) {
-					DWORD dwWritten;
-					if (!WriteFile(hWritePipe, sendBuf_.data(), static_cast<DWORD>(sendBuf_.size()), &dwWritten, nullptr) ||
-					    dwWritten != sendBuf_.size()) {
-						// エラーor閉じられた
-						break;
-					}
-					sendBuf_.clear();
-				}
-			}
+			if (stop) break;
 		}
 	}
 
@@ -329,28 +328,26 @@ void CJKStream::WorkerThread()
 			}
 		}
 		if (workerEvent_.WaitOne(0)) {
-			lock_recursive_mutex lock(workerLock_);
-			if (bStopWorker_) {
-				n = write(writePipe, "q\n", 2);
-				static_cast<void>(n);
+			bool stop;
+			std::vector<char> pending;
+			{
+				lock_recursive_mutex lock(workerLock_);
+				stop = bStopWorker_;
+				if (stop) {
+					pending.assign({'q', '\n'});
+				} else if (bOpened_) {
+					if (bShutdown_ && !bShutdownSent_) {
+						pending.assign({'c', '\n'});
+						bShutdownSent_ = true;
+					} else if (!bShutdownSent_) {
+						pending.swap(sendBuf_);
+					}
+				}
+			}
+			if (!pending.empty() && write(writePipe, pending.data(), pending.size()) != static_cast<ssize_t>(pending.size())) {
 				break;
 			}
-			if (bOpened_) {
-				if (bShutdown_ && !bShutdownSent_) {
-					if (write(writePipe, "c\n", 2) != 2) {
-						// エラーor閉じられた
-						break;
-					}
-					bShutdownSent_ = true;
-				}
-				if (sendBuf_.empty() == false && !bShutdownSent_) {
-					if (write(writePipe, sendBuf_.data(), sendBuf_.size()) != static_cast<ssize_t>(sendBuf_.size())) {
-						// エラーor閉じられた
-						break;
-					}
-					sendBuf_.clear();
-				}
-			}
+			if (stop) break;
 		}
 	}
 	close(writePipe);
