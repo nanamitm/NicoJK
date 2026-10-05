@@ -102,8 +102,12 @@
     <ClInclude Include="JKTransfer.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
-    <ClInclude Include="third_party\jsmn\jsmn.h" />
-    <ClInclude Include="ChannelWsConnection.h" />
+    <ClInclude Include="third_party\jsmn\jsmn.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="ChannelWsConnection.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
     <ClInclude Include="Common.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
