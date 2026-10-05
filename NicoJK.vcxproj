@@ -177,6 +177,7 @@
     <None Include="ReadMe.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="third_party\jsmn\jsmn.h" />
     <ClInclude Include="Common.h" />
     <ClInclude Include="ImportLogUtil.h" />
     <ClInclude Include="JKStream.h" />
