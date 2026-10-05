@@ -126,22 +126,27 @@ bool XmlToLocalFormat(LPCTSTR srcPath, const std::function<FILE *(unsigned int &
 		if (fgets(buf, sizeof(buf), fpSrc.get()) && strstr(buf, "<?xml")) {
 			const std::regex re("<chat(?= )[^>]*? date=\"(\\d+)\"[^]*?(?:/>|</chat>)");
 			std::cmatch m;
-			size_t bufLen = 0;
-			while (fgets(buf + bufLen, static_cast<int>(sizeof(buf) - bufLen), fpSrc.get())) {
-				bufLen += strlen(buf + bufLen);
-				if (bufLen >= sizeof(buf) - 1) {
-					bufLen = 0;
-					continue;
-				}
-				if (std::regex_search(buf, m, re)) {
+			size_t bufLen = strlen(buf);
+			do {
+				// 宣言と同じ行のタグも含め、完全な chat タグをすべて処理する。
+				while (std::regex_search(buf, m, re)) {
 					unsigned int tm = strtoul(m[1].first, nullptr, 10);
 					fp = onChatTag(tm);
 					if (fp) {
 						WriteChatTag(fp, m, tm);
 					}
+					size_t consumed = m[0].second - buf;
+					bufLen -= consumed;
+					memmove(buf, buf + consumed, bufLen + 1);
+				}
+				if (bufLen >= sizeof(buf) - 1) {
 					bufLen = 0;
 				}
-			}
+				if (!fgets(buf + bufLen, static_cast<int>(sizeof(buf) - bufLen), fpSrc.get())) {
+					break;
+				}
+				bufLen += strlen(buf + bufLen);
+			} while (true);
 			return true;
 		}
 	}
