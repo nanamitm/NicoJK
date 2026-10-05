@@ -3372,13 +3372,15 @@ static void ParseChannelWsJson(const std::string& json, ChannelWsMsg& msg)
 		return end != value.c_str() && *end == '\0' && 0 <= n && n <= INT_MAX ? static_cast<int>(n) : -1;
 	};
 
-	int array = member(0, "channels");
-	if (array < 0 || tokens[array].type != JSMN_ARRAY) return;
 	std::string type = stringValue(member(0, "type"));
 	if      (type == "snapshot") msg.type = 1;
 	else if (type == "stats") msg.type = 2;
 	else if (type == "programs") msg.type = 3;
 	else return;
+
+	// channels がなくても type は通知する (snapshot は接続確立の判定に使う)。
+	int array = member(0, "channels");
+	if (array < 0 || tokens[array].type != JSMN_ARRAY) return;
 
 	for (int i = array + 1; i < count && tokens[i].start < tokens[array].end; i = nextToken(i)) {
 		ChannelWsEntry e;

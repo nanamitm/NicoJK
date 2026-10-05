@@ -78,7 +78,8 @@ private:
 		WINHTTP_WEB_SOCKET_BUFFER_TYPE type = WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE;
 		~State() { if (complete) CloseHandle(complete); if (closed) CloseHandle(closed); }
 		bool IsValid() const { return complete && closed; }
-		void Prepare() { ResetEvent(complete); status = 0; }
+		// 完了情報が得られなかった場合に前回の値を使わないよう、受信結果も初期化する。
+		void Prepare() { ResetEvent(complete); status = 0; bytes = 0; type = WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE; }
 		bool Wait(HANDLE quit, DWORD expected) {
 			HANDLE events[] = {quit, complete};
 			return WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0 + 1 && status == expected;
