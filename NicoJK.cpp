@@ -25,6 +25,7 @@
 #include <uxtheme.h>
 #include <Vsstyle.h>
 #include <winhttp.h>
+#include "ChannelWsConnection.h"
 #include <wrl/event.h>
 #include <oleidl.h>
 #include <ole2.h>
@@ -3393,78 +3394,30 @@ static void ParseChannelWsJson(const std::string& json, ChannelWsMsg& msg)
 
 void CNicoJK::ChannelWsThreadFunc(HWND hwndForce, std::string wsUri)
 {
+	bool secure = wsUri.compare(0, 6, "wss://") == 0;
+	if (!secure && wsUri.compare(0, 5, "ws://") != 0) return;
+	std::string httpUrl = (secure ? "https://" : "http://") + wsUri.substr(secure ? 6 : 5);
+	std::wstring url(httpUrl.begin(), httpUrl.end());
 	while (WaitForSingleObject(hChannelWsQuit_, 0) != WAIT_OBJECT_0) {
-		// ws:// → http:// / wss:// → https:// に変換して WinHttpCrackUrl で解析
-		bool isSecure = wsUri.size() >= 6 && wsUri.substr(0, 6) == "wss://";
-		std::string httpUrl = (isSecure ? "https://" : "http://") + wsUri.substr(isSecure ? 6 : 5);
-		std::wstring wUrl(httpUrl.begin(), httpUrl.end());
-
-		URL_COMPONENTS uc = {};
-		uc.dwStructSize = sizeof(uc);
-		wchar_t szHost[256] = {}, szPath[1024] = {};
-		uc.lpszHostName = szHost; uc.dwHostNameLength = _countof(szHost);
-		uc.lpszUrlPath  = szPath; uc.dwUrlPathLength  = _countof(szPath);
-		if (!WinHttpCrackUrl(wUrl.c_str(), 0, 0, &uc)) {
-			if (WaitForSingleObject(hChannelWsQuit_, 10000) == WAIT_OBJECT_0) break;
-			continue;
-		}
-
-		HINTERNET hSession = WinHttpOpen(L"NicoJK",
-		    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-		if (!hSession) { if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break; continue; }
-
-		HINTERNET hConnect = WinHttpConnect(hSession, szHost, uc.nPort, 0);
-		HINTERNET hRequest = hConnect ? WinHttpOpenRequest(hConnect, L"GET", szPath, nullptr,
-		    WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, isSecure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
-
-		HINTERNET hWs = nullptr;
-		if (hRequest) {
-			WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
-			if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) &&
-			    WinHttpReceiveResponse(hRequest, nullptr)) {
-				hWs = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
-			}
-			WinHttpCloseHandle(hRequest);
-		}
-		if (!hWs) {
-			if (hConnect) WinHttpCloseHandle(hConnect);
-			WinHttpCloseHandle(hSession);
-			if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break;
-			continue;
-		}
-
-		// hWs を共有メンバーに登録: メインスレッドが終了時に WinHttpCloseHandle で受信を即中断できる
-		InterlockedExchangePointer(&hChannelWsHandle_, hWs);
-
-		std::string jsonBuf;
-		BYTE buf[4096];
-		for (;;) {
-			if (WaitForSingleObject(hChannelWsQuit_, 0) == WAIT_OBJECT_0) break;
-			DWORD dwRead = 0;
-			WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
-			if (WinHttpWebSocketReceive(hWs, buf, sizeof(buf), &dwRead, &type) != ERROR_SUCCESS) break;
-			if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) break;
-
-			jsonBuf.append(reinterpret_cast<char*>(buf), dwRead);
-
-			if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
-				ChannelWsMsg* pMsg = new ChannelWsMsg();
-				ParseChannelWsJson(jsonBuf, *pMsg);
-				if (pMsg->type > 0) {
-					PostMessage(hwndForce, WMS_CHANNEL_WS, pMsg->type, reinterpret_cast<LPARAM>(pMsg));
-				} else {
-					delete pMsg;
+		{
+			ChannelWsConnection connection;
+			if (connection.Connect(url, secure, hChannelWsQuit_)) {
+				std::string jsonBuf;
+				WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
+				while (connection.Receive(jsonBuf, type, hChannelWsQuit_)) {
+					if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) break;
+					if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+						ChannelWsMsg* msg = new ChannelWsMsg();
+						ParseChannelWsJson(jsonBuf, *msg);
+						if (!msg->type || !PostMessage(hwndForce, WMS_CHANNEL_WS, msg->type, reinterpret_cast<LPARAM>(msg))) {
+							delete msg;
+						}
+						jsonBuf.clear();
+					}
 				}
-				jsonBuf.clear();
+				PostMessage(hwndForce, WMS_CHANNEL_WS, 0, 0);
 			}
-		}
-
-		PostMessage(hwndForce, WMS_CHANNEL_WS, 0, 0); // 切断通知
-		// InterlockedExchange でハンドルの所有権を確認: nullptr ならメインスレッドが既に Close 済み
-		if (InterlockedExchangePointer(&hChannelWsHandle_, nullptr)) WinHttpCloseHandle(hWs);
-		WinHttpCloseHandle(hConnect);
-		WinHttpCloseHandle(hSession);
-
+		} // 停止・エラー時は未完了の要求をキャンセルし、コールバックの終了まで待つ。
 		if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break;
 	}
 }
@@ -3948,9 +3901,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			// channels WebSocket スレッドを停止
 			if (channelWsThread_.joinable()) {
 				SetEvent(hChannelWsQuit_);
-				// 受信中なら WinHttpCloseHandle で WinHttpWebSocketReceive を即中断
-				PVOID h = InterlockedExchangePointer(&hChannelWsHandle_, nullptr);
-				if (h) WinHttpCloseHandle(static_cast<HINTERNET>(h));
 				channelWsThread_.join();
 				CloseHandle(hChannelWsQuit_);
 				hChannelWsQuit_ = nullptr;

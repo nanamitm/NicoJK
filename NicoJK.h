@@ -257,7 +257,6 @@ private:
 	std::map<int, tstring>    programTitleMap_;
 	std::thread               channelWsThread_;
 	HANDLE                    hChannelWsQuit_      = nullptr;
-	PVOID volatile            hChannelWsHandle_    = nullptr; // 受信中 hWs (割り込み用)
 	std::atomic<bool>         channelWsConnected_  {false};
 	HFONT hForceFont_;
 	bool bDisplayLogList_;
