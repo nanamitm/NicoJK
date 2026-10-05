@@ -3873,11 +3873,12 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                        auto it = logList_.begin(); std::advance(it, logIdx);
 				                                        const wchar_t* m = it->marker;
 				                                        if (!wcsncmp(m, L"a:", 2)) m += 2;
-				                                        TCHAR buf[512];
-				                                        _stprintf_s(buf, TEXT("%02d:%02d:%02d (%.3s)%s"),
-				                                            it->st.wHour, it->st.wMinute, it->st.wSecond, m,
-				                                            it->bAbone ? TEXT("") : it->text.c_str());
-				                                        CopyTextToClipboard(hwndCap, buf);
+				                                        TCHAR prefix[32];
+				                                        _stprintf_s(prefix, TEXT("%02d:%02d:%02d (%.3s)"),
+				                                            it->st.wHour, it->st.wMinute, it->st.wSecond, m);
+				                                        tstring copied = prefix;
+				                                        if (!it->bAbone) copied += it->text;
+				                                        CopyTextToClipboard(hwndCap, copied);
 				                                    } else if (cmd == ID_FORCE_LIST_TOGGLE_NG && logIdx >= 0) {
 				                                        ToggleLogListNG(logIdx);
 				                                    }
