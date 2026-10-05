@@ -1572,6 +1572,7 @@ bool CNicoJK::ProcessChatTag(const char *tag, bool bShow, int showDelay, bool *p
 
 		// リストボックスのログ表示キューに追加
 		LOG_ELEM e;
+		e.id = ++nextLogID_;
 		FILETIME ft, ftUtc = LongLongToFileTime(UnixTimeToFileTime(tm));
 		FileTimeToLocalFileTime(&ftUtc, &ft);
 		FileTimeToSystemTime(&ft, &e.st);
@@ -1608,6 +1609,7 @@ void CNicoJK::OutputMessageLog(LPCTSTR text)
 {
 	// リストボックスのログ表示キューに追加
 	LOG_ELEM e;
+	e.id = ++nextLogID_;
 	GetLocalTime(&e.st);
 	e.type = LOG_ELEM_TYPE_MESSAGE;
 	e.no = 0;
@@ -2182,6 +2184,17 @@ bool CNicoJK::BuildUserNGPattern(LPCTSTR marker, RPL_ELEM *pElem, tstring *pOldP
 		*pOldPattern = pattern;
 	}
 	return true;
+}
+
+int CNicoJK::FindLogListIndexByID(ULONGLONG id) const
+{
+	if (!id) return -1;
+	int index = 0;
+	for (const auto& elem : logList_) {
+		if (elem.id == id) return index;
+		++index;
+	}
+	return -1;
 }
 
 int CNicoJK::GetLogListNGState(int index)
@@ -2990,16 +3003,16 @@ L.addEventListener('scroll',()=>{bot=L.scrollTop+L.clientHeight>=L.scrollHeight-
 L.addEventListener('contextmenu',e=>{
   e.preventDefault();const it=e.target.closest('.i');if(!it)return;
   if(sel)sel.classList.remove('s');sel=it;it.classList.add('s');
-  window.chrome.webview.postMessage(JSON.stringify({cmd:'ctx',m:it.dataset.m,tm:it.querySelector('.tm').textContent,x:e.screenX,y:e.screenY}));
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'ctx',id:it.dataset.id,x:e.screenX,y:e.screenY}));
 });
 L.addEventListener('dblclick',e=>{
   const it=e.target.closest('.i');if(!it||it.classList.contains('msg'))return;
-  window.chrome.webview.postMessage(JSON.stringify({cmd:'dbl',m:it.dataset.m,tm:it.querySelector('.tm').textContent}));
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'dbl',id:it.dataset.id}));
 });
 function add(d){
   const v=document.createElement('div');
   v.className='i'+(d.tp?' '+d.tp:'')+(d.ab?' ab':'');
-  v.dataset.m=d.m||'';v.dataset.t=d.tx||'';v.dataset.mk=d.m?d.m.substring(0,3):'';
+  v.dataset.id=d.id;v.dataset.m=d.m||'';v.dataset.t=d.tx||'';v.dataset.mk=d.m?d.m.substring(0,3):'';
   const tm=document.createElement('span');tm.className='tm';tm.textContent=d.tm;
   const mk=document.createElement('span');mk.className='mk';if(d.mc)mk.style.color=d.mc;mk.textContent=d.m?(d.m.substring(0,3)+'  '):'';
   const tx=document.createElement('span');tx.className='tx';if(d.cl)tx.style.color=d.cl;tx.textContent=d.ab?'':d.tx;
@@ -3136,7 +3149,7 @@ std::wstring CNicoJK::LogElemToJson(const LOG_ELEM& e) const
 	wchar_t tm[12];
 	swprintf_s(tm, L"%02d:%02d:%02d", e.st.wHour, e.st.wMinute, e.st.wSecond);
 	// WM_DRAWITEM(line 4519): bEmphasis=MSG型のとき赤。それ以外はパネル文字色（CSS var(--fg)）
-	std::wstring json = std::wstring(L"{\"tx\":\"") + LogJsonEsc(e.text.c_str());
+	std::wstring json = L"{\"id\":\"" + std::to_wstring(e.id) + L"\",\"tx\":\"" + LogJsonEsc(e.text.c_str());
 	if (e.type == LOG_ELEM_TYPE_MESSAGE) {
 		json += L"\",\"cl\":\"#ff0000";  // 赤固定
 	}
@@ -3766,28 +3779,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                        size_t p = s.find(nd);
 				                                        return p != std::wstring::npos ? _wtoi(s.c_str() + p + nd.size()) : 0;
 				                                    };
-				                                    std::wstring marker = jstr(L"m");
-				                                    std::wstring timeStr = jstr(L"tm");
+				                                    std::wstring idText = jstr(L"id");
+				                                    ULONGLONG logID = _wcstoui64(idText.c_str(), nullptr, 10);
+				                                    if (std::to_wstring(logID) != idText) logID = 0;
+				                                    int logIdx = FindLogListIndexByID(logID);
 				                                    int sx = jint(L"x"), sy = jint(L"y");
-				                                    // marker と時刻で logList_ を検索
-				                                    int logIdx = -1;
-				                                    {
-				                                        auto it = logList_.begin();
-				                                        for (int i = 0; it != logList_.end(); ++it, ++i) {
-				                                            const wchar_t* m = it->marker;
-				                                            if (!wcsncmp(m, L"a:", 2)) m += 2;
-				                                            wchar_t tm[12]; swprintf_s(tm, L"%02d:%02d:%02d", it->st.wHour, it->st.wMinute, it->st.wSecond);
-				                                            if (marker == m && timeStr == tm) { logIdx = i; break; }
-				                                        }
-				                                        if (logIdx < 0) { // 時刻が一致しない場合は marker のみで検索
-				                                            it = logList_.begin();
-				                                            for (int i = 0; it != logList_.end(); ++it, ++i) {
-				                                                const wchar_t* m = it->marker;
-				                                                if (!wcsncmp(m, L"a:", 2)) m += 2;
-				                                                if (marker == m) { logIdx = i; break; }
-				                                            }
-				                                        }
-				                                    }
 				                                    // コメント投稿
 				                                    if (s.find(L"\"cmd\":\"post\"") != std::wstring::npos) {
 				                                        std::wstring mail = jstr(L"mail");
@@ -3822,21 +3818,27 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                                ngState ? TEXT("NG解除(&N)") : TEXT("NG登録(&N)"));
 				                                        }
 				                                    }
+				                                    LOG_ELEM selected = {};
+				                                    if (logIdx >= 0) {
+				                                        auto it = logList_.begin(); std::advance(it, logIdx);
+				                                        selected = *it;
+				                                    }
 				                                    SetForegroundWindow(hwndCap);
 				                                    UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, hwndCap, nullptr);
 				                                    DestroyMenu(hMenu);
-				                                    if (cmd == ID_FORCE_LIST_COPY && logIdx >= 0) {
-				                                        auto it = logList_.begin(); std::advance(it, logIdx);
-				                                        const wchar_t* m = it->marker;
-				                                        if (!wcsncmp(m, L"a:", 2)) m += 2;
+				                                    if (cmd == ID_FORCE_LIST_COPY && selected.id) {
+				                                        const wchar_t* marker = selected.marker;
+				                                        if (!wcsncmp(marker, L"a:", 2)) marker += 2;
 				                                        TCHAR prefix[32];
 				                                        _stprintf_s(prefix, TEXT("%02d:%02d:%02d (%.3s)"),
-				                                            it->st.wHour, it->st.wMinute, it->st.wSecond, m);
+				                                            selected.st.wHour, selected.st.wMinute, selected.st.wSecond, marker);
 				                                        tstring copied = prefix;
-				                                        if (!it->bAbone) copied += it->text;
+				                                        if (!selected.bAbone) copied += selected.text;
 				                                        CopyTextToClipboard(hwndCap, copied);
-				                                    } else if (cmd == ID_FORCE_LIST_TOGGLE_NG && logIdx >= 0) {
-				                                        ToggleLogListNG(logIdx);
+				                                    } else if (cmd == ID_FORCE_LIST_TOGGLE_NG) {
+				                                        // 先頭の削除で位置が変わっても同じコメントを探す。削除済みなら操作しない。
+				                                        int currentIndex = FindLogListIndexByID(logID);
+				                                        if (currentIndex >= 0) ToggleLogListNG(currentIndex);
 				                                    }
 				                                    return S_OK;
 				                                }).Get(), &logWV2MsgToken_);

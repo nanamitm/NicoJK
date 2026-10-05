@@ -141,6 +141,7 @@ private:
 		LOG_ELEM_TYPE_MESSAGE,
 	};
 	struct LOG_ELEM {
+		ULONGLONG id;
 		SYSTEMTIME st;
 		LOG_ELEM_TYPE type;
 		int no;
@@ -194,6 +195,7 @@ private:
 	void OutputMessageLog(LPCTSTR text);
 	void ProcessLocalPost(LPCTSTR comm);
 	bool BuildUserNGPattern(LPCTSTR marker, RPL_ELEM *pElem, tstring *pOldPattern);
+	int FindLogListIndexByID(ULONGLONG id) const;
 	int GetLogListNGState(int index);
 	void ToggleLogListNG(int index);
 	void RestorePopupWindowOpacity(HWND hwnd);
@@ -262,6 +264,7 @@ private:
 	bool bDisplayLogList_;
 	std::vector<FORCE_ELEM> forceList_;
 	std::list<LOG_ELEM> logList_;
+	ULONGLONG nextLogID_ = 0;
 	size_t logListDisplayedSize_;
 	bool bPendingTimerUpdateList_;
 	DWORD lastUpdateListTick_;
