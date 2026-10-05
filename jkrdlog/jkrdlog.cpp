@@ -142,6 +142,8 @@ int main(int argc, char **argv)
 			if (readRatePerMille <= 0) {
 				// ウェイト無しなのでファイルチェックを毎秒行うと高負荷になるため
 				if (!logReader.IsOpen()) {
+					// EOF を検出した呼び出しにも、最後の秒のコメントが含まれる。
+					buf += textBuf;
 					bSkip = true;
 					bFindNext = true;
 					break;

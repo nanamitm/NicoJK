@@ -16,12 +16,16 @@
 #include "NetworkServiceIDTable.h"
 #include "JKIDNameTable.h"
 #include "NicoJK.h"
+#define JSMN_STATIC
+#define JSMN_STRICT
+#include "third_party/jsmn/jsmn.h"
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <Vsstyle.h>
 #include <winhttp.h>
+#include "ChannelWsConnection.h"
 #include <wrl/event.h>
 #include <oleidl.h>
 #include <ole2.h>
@@ -1568,6 +1572,7 @@ bool CNicoJK::ProcessChatTag(const char *tag, bool bShow, int showDelay, bool *p
 
 		// リストボックスのログ表示キューに追加
 		LOG_ELEM e;
+		e.id = ++nextLogID_;
 		FILETIME ft, ftUtc = LongLongToFileTime(UnixTimeToFileTime(tm));
 		FileTimeToLocalFileTime(&ftUtc, &ft);
 		FileTimeToSystemTime(&ft, &e.st);
@@ -1604,6 +1609,7 @@ void CNicoJK::OutputMessageLog(LPCTSTR text)
 {
 	// リストボックスのログ表示キューに追加
 	LOG_ELEM e;
+	e.id = ++nextLogID_;
 	GetLocalTime(&e.st);
 	e.type = LOG_ELEM_TYPE_MESSAGE;
 	e.no = 0;
@@ -2178,6 +2184,17 @@ bool CNicoJK::BuildUserNGPattern(LPCTSTR marker, RPL_ELEM *pElem, tstring *pOldP
 		*pOldPattern = pattern;
 	}
 	return true;
+}
+
+int CNicoJK::FindLogListIndexByID(ULONGLONG id) const
+{
+	if (!id) return -1;
+	int index = 0;
+	for (const auto& elem : logList_) {
+		if (elem.id == id) return index;
+		++index;
+	}
+	return -1;
 }
 
 int CNicoJK::GetLogListNGState(int index)
@@ -2986,16 +3003,16 @@ L.addEventListener('scroll',()=>{bot=L.scrollTop+L.clientHeight>=L.scrollHeight-
 L.addEventListener('contextmenu',e=>{
   e.preventDefault();const it=e.target.closest('.i');if(!it)return;
   if(sel)sel.classList.remove('s');sel=it;it.classList.add('s');
-  window.chrome.webview.postMessage(JSON.stringify({cmd:'ctx',m:it.dataset.m,tm:it.querySelector('.tm').textContent,x:e.screenX,y:e.screenY}));
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'ctx',id:it.dataset.id,x:e.screenX,y:e.screenY}));
 });
 L.addEventListener('dblclick',e=>{
   const it=e.target.closest('.i');if(!it||it.classList.contains('msg'))return;
-  window.chrome.webview.postMessage(JSON.stringify({cmd:'dbl',m:it.dataset.m,tm:it.querySelector('.tm').textContent}));
+  window.chrome.webview.postMessage(JSON.stringify({cmd:'dbl',id:it.dataset.id}));
 });
 function add(d){
   const v=document.createElement('div');
   v.className='i'+(d.tp?' '+d.tp:'')+(d.ab?' ab':'');
-  v.dataset.m=d.m||'';v.dataset.t=d.tx||'';v.dataset.mk=d.m?d.m.substring(0,3):'';
+  v.dataset.id=d.id;v.dataset.m=d.m||'';v.dataset.t=d.tx||'';v.dataset.mk=d.m?d.m.substring(0,3):'';
   const tm=document.createElement('span');tm.className='tm';tm.textContent=d.tm;
   const mk=document.createElement('span');mk.className='mk';if(d.mc)mk.style.color=d.mc;mk.textContent=d.m?(d.m.substring(0,3)+'  '):'';
   const tx=document.createElement('span');tx.className='tx';if(d.cl)tx.style.color=d.cl;tx.textContent=d.ab?'':d.tx;
@@ -3132,7 +3149,7 @@ std::wstring CNicoJK::LogElemToJson(const LOG_ELEM& e) const
 	wchar_t tm[12];
 	swprintf_s(tm, L"%02d:%02d:%02d", e.st.wHour, e.st.wMinute, e.st.wSecond);
 	// WM_DRAWITEM(line 4519): bEmphasis=MSG型のとき赤。それ以外はパネル文字色（CSS var(--fg)）
-	std::wstring json = std::wstring(L"{\"tx\":\"") + LogJsonEsc(e.text.c_str());
+	std::wstring json = L"{\"id\":\"" + std::to_wstring(e.id) + L"\",\"tx\":\"" + LogJsonEsc(e.text.c_str());
 	if (e.type == LOG_ELEM_TYPE_MESSAGE) {
 		json += L"\",\"cl\":\"#ff0000";  // 赤固定
 	}
@@ -3275,22 +3292,10 @@ struct ChannelWsMsg {
 	std::vector<ChannelWsEntry> channels;
 };
 
-static int CwsJInt(const std::string& s, const char* key) {
-	std::string nd = std::string("\"") + key + "\":";
-	auto p = s.find(nd);
-	if (p == std::string::npos) return -1;
-	p += nd.size();
-	while (p < s.size() && s[p] == ' ') ++p;
-	if (p >= s.size() || (s[p] != '-' && (s[p] < '0' || s[p] > '9'))) return -1;
-	return std::strtol(s.c_str() + p, nullptr, 10);
-}
-static std::string CwsJStr(const std::string& s, const char* key) {
-	std::string nd = std::string("\"") + key + "\":\"";
-	auto p = s.find(nd);
-	if (p == std::string::npos) return {};
-	p += nd.size();
+static std::string CwsJStr(const std::string& s) {
+	size_t p = 0;
 	std::string r;
-	for (; p < s.size() && s[p] != '"'; ++p) {
+	for (; p < s.size(); ++p) {
 		if (s[p] != '\\' || p + 1 >= s.size()) { r += s[p]; continue; }
 		++p;
 		switch (s[p]) {
@@ -3298,6 +3303,8 @@ static std::string CwsJStr(const std::string& s, const char* key) {
 		case 'n': r += '\n'; break;
 		case 'r': r += '\r'; break;
 		case 't': r += '\t'; break;
+		case 'b': r += '\b'; break;
+		case 'f': r += '\f'; break;
 		case 'u':
 			if (p + 4 < s.size()) {
 				char h[5] = { s[p+1], s[p+2], s[p+3], s[p+4], '\0' };
@@ -3326,142 +3333,106 @@ static std::string CwsJStr(const std::string& s, const char* key) {
 }
 static void ParseChannelWsJson(const std::string& json, ChannelWsMsg& msg)
 {
-	std::string t = CwsJStr(json, "type");
-	if      (t == "snapshot") msg.type = 1;
-	else if (t == "stats")    msg.type = 2;
-	else if (t == "programs") msg.type = 3;
+	msg = ChannelWsMsg();
+	if (json.size() > INT_MAX) return;
+	jsmn_parser parser;
+	jsmn_init(&parser);
+	int count = jsmn_parse(&parser, json.c_str(), json.size(), nullptr, 0);
+	if (count <= 0) return;
+	std::vector<jsmntok_t> tokens(count);
+	jsmn_init(&parser);
+	if (jsmn_parse(&parser, json.c_str(), json.size(), tokens.data(), count) != count ||
+	    tokens[0].type != JSMN_OBJECT ||
+	    static_cast<size_t>(tokens[0].end) != json.find_last_not_of(" \t\r\n") + 1) return;
+
+	// トークンの範囲で子孫を飛ばし、指定したオブジェクトの直属フィールドだけを探す。
+	auto nextToken = [&](int index) {
+		int end = tokens[index].end;
+		do { ++index; } while (index < count && tokens[index].start < end);
+		return index;
+	};
+	auto member = [&](int object, const char* key) {
+		if (object < 0 || tokens[object].type != JSMN_OBJECT) return -1;
+		for (int i = object + 1; i + 1 < count && tokens[i].start < tokens[object].end;) {
+			if (tokens[i].type != JSMN_STRING || tokens[i].size != 1) return -1;
+			if (json.compare(tokens[i].start, tokens[i].end - tokens[i].start, key) == 0) return i + 1;
+			i = nextToken(i + 1);
+		}
+		return -1;
+	};
+	auto stringValue = [&](int index) {
+		return index >= 0 && tokens[index].type == JSMN_STRING ?
+		    CwsJStr(json.substr(tokens[index].start, tokens[index].end - tokens[index].start)) : std::string();
+	};
+	auto intValue = [&](int index) {
+		if (index < 0 || tokens[index].type != JSMN_PRIMITIVE) return -1;
+		std::string value = json.substr(tokens[index].start, tokens[index].end - tokens[index].start);
+		char* end;
+		long long n = std::strtoll(value.c_str(), &end, 10);
+		return end != value.c_str() && *end == '\0' && 0 <= n && n <= INT_MAX ? static_cast<int>(n) : -1;
+	};
+
+	std::string type = stringValue(member(0, "type"));
+	if      (type == "snapshot") msg.type = 1;
+	else if (type == "stats") msg.type = 2;
+	else if (type == "programs") msg.type = 3;
 	else return;
 
-	auto chArr = json.find("\"channels\":");
-	if (chArr == std::string::npos) return;
-	auto aStart = json.find('[', chArr);
-	if (aStart == std::string::npos) return;
+	// channels がなくても type は通知する (snapshot は接続確立の判定に使う)。
+	int array = member(0, "channels");
+	if (array < 0 || tokens[array].type != JSMN_ARRAY) return;
 
-	size_t pos = aStart + 1;
-	while (pos < json.size()) {
-		auto oS = json.find('{', pos);
-		if (oS == std::string::npos) break;
-		int depth = 0;
-		size_t oE = oS;
-		for (; oE < json.size(); ++oE) {
-			if      (json[oE] == '{') ++depth;
-			else if (json[oE] == '}' && --depth == 0) break;
-		}
-		if (depth != 0) break;
-
-		std::string obj = json.substr(oS, oE - oS + 1);
+	for (int i = array + 1; i < count && tokens[i].start < tokens[array].end; i = nextToken(i)) {
 		ChannelWsEntry e;
-		e.id = CwsJInt(obj, "id");
-		if (e.id <= 0) { pos = oE + 1; continue; }
-
-		int force = CwsJInt(obj, "force");
-		if (force >= 0) { e.force = force; e.hasForce = true; }
-
-		auto pPos = obj.find("\"program\":");
-		if (pPos != std::string::npos) {
-			auto vPos = obj.find_first_not_of(" \t\r\n", pPos + 10);
-			if (vPos != std::string::npos) {
-				if (obj.compare(vPos, 4, "null") == 0) {
-					e.hasProgramTitle = true; // null → タイトルなし
-				} else if (obj[vPos] == '{') {
-					int pd = 0; size_t pE = vPos;
-					for (; pE < obj.size(); ++pE) {
-						if      (obj[pE] == '{') ++pd;
-						else if (obj[pE] == '}' && --pd == 0) break;
-					}
-					std::string prog = obj.substr(vPos, pE - vPos + 1);
-					std::string title = CwsJStr(prog, "title");
-					if (!title.empty()) {
-						int wl = MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, nullptr, 0);
-						if (wl > 1) {
-							e.programTitle.resize(wl - 1);
-							MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, &e.programTitle[0], wl);
-						}
-					}
-					e.hasProgramTitle = true;
+		e.id = intValue(member(i, "id"));
+		if (e.id <= 0) continue;
+		e.force = intValue(member(i, "force"));
+		e.hasForce = e.force >= 0;
+		int program = member(i, "program");
+		if (program >= 0) {
+			if (tokens[program].type == JSMN_PRIMITIVE &&
+			    json.compare(tokens[program].start, tokens[program].end - tokens[program].start, "null") == 0) {
+				e.hasProgramTitle = true;
+			} else if (tokens[program].type == JSMN_OBJECT) {
+				std::string title = stringValue(member(program, "title"));
+				int length = MultiByteToWideChar(CP_UTF8, 0, title.data(), static_cast<int>(title.size()), nullptr, 0);
+				if (length > 0) {
+					e.programTitle.resize(length);
+					MultiByteToWideChar(CP_UTF8, 0, title.data(), static_cast<int>(title.size()), &e.programTitle[0], length);
 				}
+				e.hasProgramTitle = true;
 			}
 		}
-
 		msg.channels.push_back(std::move(e));
-		pos = oE + 1;
 	}
 }
 
 void CNicoJK::ChannelWsThreadFunc(HWND hwndForce, std::string wsUri)
 {
+	bool secure = wsUri.compare(0, 6, "wss://") == 0;
+	if (!secure && wsUri.compare(0, 5, "ws://") != 0) return;
+	std::string httpUrl = (secure ? "https://" : "http://") + wsUri.substr(secure ? 6 : 5);
+	std::wstring url(httpUrl.begin(), httpUrl.end());
 	while (WaitForSingleObject(hChannelWsQuit_, 0) != WAIT_OBJECT_0) {
-		// ws:// → http:// / wss:// → https:// に変換して WinHttpCrackUrl で解析
-		bool isSecure = wsUri.size() >= 6 && wsUri.substr(0, 6) == "wss://";
-		std::string httpUrl = (isSecure ? "https://" : "http://") + wsUri.substr(isSecure ? 6 : 5);
-		std::wstring wUrl(httpUrl.begin(), httpUrl.end());
-
-		URL_COMPONENTS uc = {};
-		uc.dwStructSize = sizeof(uc);
-		wchar_t szHost[256] = {}, szPath[1024] = {};
-		uc.lpszHostName = szHost; uc.dwHostNameLength = _countof(szHost);
-		uc.lpszUrlPath  = szPath; uc.dwUrlPathLength  = _countof(szPath);
-		if (!WinHttpCrackUrl(wUrl.c_str(), 0, 0, &uc)) {
-			if (WaitForSingleObject(hChannelWsQuit_, 10000) == WAIT_OBJECT_0) break;
-			continue;
-		}
-
-		HINTERNET hSession = WinHttpOpen(L"NicoJK",
-		    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-		if (!hSession) { if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break; continue; }
-
-		HINTERNET hConnect = WinHttpConnect(hSession, szHost, uc.nPort, 0);
-		HINTERNET hRequest = hConnect ? WinHttpOpenRequest(hConnect, L"GET", szPath, nullptr,
-		    WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, isSecure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
-
-		HINTERNET hWs = nullptr;
-		if (hRequest) {
-			WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
-			if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) &&
-			    WinHttpReceiveResponse(hRequest, nullptr)) {
-				hWs = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
-			}
-			WinHttpCloseHandle(hRequest);
-		}
-		if (!hWs) {
-			if (hConnect) WinHttpCloseHandle(hConnect);
-			WinHttpCloseHandle(hSession);
-			if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break;
-			continue;
-		}
-
-		// hWs を共有メンバーに登録: メインスレッドが終了時に WinHttpCloseHandle で受信を即中断できる
-		InterlockedExchangePointer(&hChannelWsHandle_, hWs);
-
-		std::string jsonBuf;
-		BYTE buf[4096];
-		for (;;) {
-			if (WaitForSingleObject(hChannelWsQuit_, 0) == WAIT_OBJECT_0) break;
-			DWORD dwRead = 0;
-			WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
-			if (WinHttpWebSocketReceive(hWs, buf, sizeof(buf), &dwRead, &type) != ERROR_SUCCESS) break;
-			if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) break;
-
-			jsonBuf.append(reinterpret_cast<char*>(buf), dwRead);
-
-			if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
-				ChannelWsMsg* pMsg = new ChannelWsMsg();
-				ParseChannelWsJson(jsonBuf, *pMsg);
-				if (pMsg->type > 0) {
-					PostMessage(hwndForce, WMS_CHANNEL_WS, pMsg->type, reinterpret_cast<LPARAM>(pMsg));
-				} else {
-					delete pMsg;
+		{
+			ChannelWsConnection connection;
+			if (connection.Connect(url, secure, hChannelWsQuit_)) {
+				std::string jsonBuf;
+				WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
+				while (connection.Receive(jsonBuf, type, hChannelWsQuit_)) {
+					if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) break;
+					if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+						ChannelWsMsg* msg = new ChannelWsMsg();
+						ParseChannelWsJson(jsonBuf, *msg);
+						if (!msg->type || !PostMessage(hwndForce, WMS_CHANNEL_WS, msg->type, reinterpret_cast<LPARAM>(msg))) {
+							delete msg;
+						}
+						jsonBuf.clear();
+					}
 				}
-				jsonBuf.clear();
+				PostMessage(hwndForce, WMS_CHANNEL_WS, 0, 0);
 			}
-		}
-
-		PostMessage(hwndForce, WMS_CHANNEL_WS, 0, 0); // 切断通知
-		// InterlockedExchange でハンドルの所有権を確認: nullptr ならメインスレッドが既に Close 済み
-		if (InterlockedExchangePointer(&hChannelWsHandle_, nullptr)) WinHttpCloseHandle(hWs);
-		WinHttpCloseHandle(hConnect);
-		WinHttpCloseHandle(hSession);
-
+		} // 停止・エラー時は未完了の要求をキャンセルし、コールバックの終了まで待つ。
 		if (WaitForSingleObject(hChannelWsQuit_, 5000) == WAIT_OBJECT_0) break;
 	}
 }
@@ -3810,28 +3781,11 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                        size_t p = s.find(nd);
 				                                        return p != std::wstring::npos ? _wtoi(s.c_str() + p + nd.size()) : 0;
 				                                    };
-				                                    std::wstring marker = jstr(L"m");
-				                                    std::wstring timeStr = jstr(L"tm");
+				                                    std::wstring idText = jstr(L"id");
+				                                    ULONGLONG logID = _wcstoui64(idText.c_str(), nullptr, 10);
+				                                    if (std::to_wstring(logID) != idText) logID = 0;
+				                                    int logIdx = FindLogListIndexByID(logID);
 				                                    int sx = jint(L"x"), sy = jint(L"y");
-				                                    // marker と時刻で logList_ を検索
-				                                    int logIdx = -1;
-				                                    {
-				                                        auto it = logList_.begin();
-				                                        for (int i = 0; it != logList_.end(); ++it, ++i) {
-				                                            const wchar_t* m = it->marker;
-				                                            if (!wcsncmp(m, L"a:", 2)) m += 2;
-				                                            wchar_t tm[12]; swprintf_s(tm, L"%02d:%02d:%02d", it->st.wHour, it->st.wMinute, it->st.wSecond);
-				                                            if (marker == m && timeStr == tm) { logIdx = i; break; }
-				                                        }
-				                                        if (logIdx < 0) { // 時刻が一致しない場合は marker のみで検索
-				                                            it = logList_.begin();
-				                                            for (int i = 0; it != logList_.end(); ++it, ++i) {
-				                                                const wchar_t* m = it->marker;
-				                                                if (!wcsncmp(m, L"a:", 2)) m += 2;
-				                                                if (marker == m) { logIdx = i; break; }
-				                                            }
-				                                        }
-				                                    }
 				                                    // コメント投稿
 				                                    if (s.find(L"\"cmd\":\"post\"") != std::wstring::npos) {
 				                                        std::wstring mail = jstr(L"mail");
@@ -3866,20 +3820,27 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 				                                                ngState ? TEXT("NG解除(&N)") : TEXT("NG登録(&N)"));
 				                                        }
 				                                    }
+				                                    LOG_ELEM selected = {};
+				                                    if (logIdx >= 0) {
+				                                        auto it = logList_.begin(); std::advance(it, logIdx);
+				                                        selected = *it;
+				                                    }
 				                                    SetForegroundWindow(hwndCap);
 				                                    UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, hwndCap, nullptr);
 				                                    DestroyMenu(hMenu);
-				                                    if (cmd == ID_FORCE_LIST_COPY && logIdx >= 0) {
-				                                        auto it = logList_.begin(); std::advance(it, logIdx);
-				                                        const wchar_t* m = it->marker;
-				                                        if (!wcsncmp(m, L"a:", 2)) m += 2;
-				                                        TCHAR buf[512];
-				                                        _stprintf_s(buf, TEXT("%02d:%02d:%02d (%.3s)%s"),
-				                                            it->st.wHour, it->st.wMinute, it->st.wSecond, m,
-				                                            it->bAbone ? TEXT("") : it->text.c_str());
-				                                        CopyTextToClipboard(hwndCap, buf);
-				                                    } else if (cmd == ID_FORCE_LIST_TOGGLE_NG && logIdx >= 0) {
-				                                        ToggleLogListNG(logIdx);
+				                                    if (cmd == ID_FORCE_LIST_COPY && selected.id) {
+				                                        const wchar_t* marker = selected.marker;
+				                                        if (!wcsncmp(marker, L"a:", 2)) marker += 2;
+				                                        TCHAR prefix[32];
+				                                        _stprintf_s(prefix, TEXT("%02d:%02d:%02d (%.3s)"),
+				                                            selected.st.wHour, selected.st.wMinute, selected.st.wSecond, marker);
+				                                        tstring copied = prefix;
+				                                        if (!selected.bAbone) copied += selected.text;
+				                                        CopyTextToClipboard(hwndCap, copied);
+				                                    } else if (cmd == ID_FORCE_LIST_TOGGLE_NG) {
+				                                        // 先頭の削除で位置が変わっても同じコメントを探す。削除済みなら操作しない。
+				                                        int currentIndex = FindLogListIndexByID(logID);
+				                                        if (currentIndex >= 0) ToggleLogListNG(currentIndex);
 				                                    }
 				                                    return S_OK;
 				                                }).Get(), &logWV2MsgToken_);
@@ -3944,9 +3905,6 @@ LRESULT CNicoJK::ForceWindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 			// channels WebSocket スレッドを停止
 			if (channelWsThread_.joinable()) {
 				SetEvent(hChannelWsQuit_);
-				// 受信中なら WinHttpCloseHandle で WinHttpWebSocketReceive を即中断
-				PVOID h = InterlockedExchangePointer(&hChannelWsHandle_, nullptr);
-				if (h) WinHttpCloseHandle(static_cast<HINTERNET>(h));
 				channelWsThread_.join();
 				CloseHandle(hChannelWsQuit_);
 				hChannelWsQuit_ = nullptr;

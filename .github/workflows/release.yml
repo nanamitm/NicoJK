@@ -99,6 +99,7 @@ jobs:
           Copy-Item 'Release/NicoJK.tvtp', 'Release/jkimlog.exe', 'Release/jkrdlog.exe' "$dir/x86/"
           Copy-Item 'x64/Release/NicoJK.tvtp', 'x64/Release/jkimlog.exe', 'x64/Release/jkrdlog.exe' "$dir/x64/"
           Copy-Item 'NicoJK.ini', 'Readme.txt', 'ChangeLog.txt', 'jkch.sh.txt' $dir
+          Copy-Item 'third_party/jsmn/LICENSE.txt' "$dir/jsmn-License.txt"
           Copy-Item -Recurse 'dist/jkcnsl-expanded/jkcnsl' "$dir/jkcnsl"
           Compress-Archive -Path $dir -DestinationPath "dist/NicoJK-$env:VERSION.zip"
 
