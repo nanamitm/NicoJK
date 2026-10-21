@@ -16,6 +16,7 @@
 !webview2sdk/x86/*.lib
 !webview2sdk/x64/*.lib
 !.gitignore
+!.gitattributes
 !Makefile
 !README
 *.FileListAbsolute.txt
