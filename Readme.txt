@@ -150,7 +150,7 @@ https://github.com/rutice/NicoJK/downloads
 
 ■ソースコード
 https://github.com/rutice/NicoJK
-※このフォークのソースコードは https://github.com/xt4ubq/NicoJK
+※このフォークのソースコードは https://github.com/xtne6f/NicoJK
 
 ■Linux環境むけ
 jkimlogおよびjkrdlogはLinuxでもビルドできます。加えてチューナープロセス(今のとこ
