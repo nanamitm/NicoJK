@@ -1,0 +1,4 @@
+# NicoJK.ini is committed with CRLF line endings, as upstream (xtne6f/NicoJK) does.
+# Disable end-of-line conversion so core.autocrlf=input cannot turn it into LF,
+# which would make every line conflict on the next upstream merge.
+NicoJK.ini -text
